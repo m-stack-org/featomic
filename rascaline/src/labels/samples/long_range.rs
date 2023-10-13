@@ -22,7 +22,7 @@ impl SamplesBuilder for LongRangeSamplesPerAtom {
         vec!["structure", "center"]
     }
 
-    fn samples(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn samples(&self, systems: &mut [System]) -> Result<Labels, Error> {
         assert!(self.self_pairs, "self.self_pairs = false is not implemented");
 
         let mut builder = LabelsBuilder::new(Self::sample_names());
@@ -52,7 +52,7 @@ impl SamplesBuilder for LongRangeSamplesPerAtom {
         return Ok(builder.finish());
     }
 
-    fn gradients_for(&self, systems: &mut [Box<dyn System>], samples: &Labels) -> Result<Labels, Error> {
+    fn gradients_for(&self, systems: &mut [System], samples: &Labels) -> Result<Labels, Error> {
         assert_eq!(samples.names(), ["structure", "center"]);
         let mut builder = LabelsBuilder::new(vec!["sample", "structure", "atom"]);
 

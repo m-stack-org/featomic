@@ -8,14 +8,14 @@ use crate::{System, Error};
 /// Common interface to create a set of metatensor's `TensorMap` keys from systems
 pub trait KeysBuilder {
     /// Compute the keys corresponding to these systems
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error>;
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error>;
 }
 
 /// Compute a set of keys with a single variable, the central atom species.
 pub struct CenterSpeciesKeys;
 
 impl KeysBuilder for CenterSpeciesKeys {
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         let mut all_species = BTreeSet::new();
         for system in systems {
             for &species in system.species()? {
@@ -36,7 +36,7 @@ impl KeysBuilder for CenterSpeciesKeys {
 pub struct AllSpeciesPairsKeys {}
 
 impl KeysBuilder for AllSpeciesPairsKeys {
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
 
         let mut all_species_pairs = BTreeSet::new();
         for system in systems {
@@ -66,7 +66,7 @@ pub struct CenterSingleNeighborsSpeciesKeys {
 }
 
 impl KeysBuilder for CenterSingleNeighborsSpeciesKeys {
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         assert!(self.cutoff > 0.0 && self.cutoff.is_finite());
 
         let mut all_species_pairs = BTreeSet::new();
@@ -108,7 +108,7 @@ pub struct CenterTwoNeighborsSpeciesKeys {
 }
 
 impl KeysBuilder for CenterTwoNeighborsSpeciesKeys {
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         assert!(self.cutoff > 0.0 && self.cutoff.is_finite());
 
         let mut keys = BTreeSet::new();

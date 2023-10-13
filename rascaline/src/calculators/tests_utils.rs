@@ -4,7 +4,7 @@ use approx::{assert_relative_eq, assert_ulps_eq};
 use metatensor::{Labels, TensorMap, LabelsBuilder};
 
 use crate::calculator::LabelsSelection;
-use crate::{CalculationOptions, Calculator};
+use crate::{CalculationOptions, Calculator, SystemBase};
 use crate::systems::{System, SimpleSystem, UnitCell};
 
 /// Check that computing a partial subset of features/samples works as intended
@@ -15,7 +15,7 @@ use crate::systems::{System, SimpleSystem, UnitCell};
 /// gradients.
 pub fn compute_partial(
     mut calculator: Calculator,
-    systems: &mut [Box<dyn System>],
+    systems: &mut [System],
     keys: &Labels,
     samples: &Labels,
     properties: &Labels,
@@ -51,7 +51,7 @@ pub fn compute_partial(
 
 fn check_compute_partial_keys(
     calculator: &mut Calculator,
-    systems: &mut [Box<dyn System>],
+    systems: &mut [System],
     full: &TensorMap,
     keys: &Labels,
 ) {
@@ -84,7 +84,7 @@ fn check_compute_partial_keys(
 
 fn check_compute_partial_properties(
     calculator: &mut Calculator,
-    systems: &mut [Box<dyn System>],
+    systems: &mut [System],
     full: &TensorMap,
     properties: &Labels,
 ) {
@@ -130,7 +130,7 @@ fn check_compute_partial_properties(
 
 fn check_compute_partial_samples(
     calculator: &mut Calculator,
-    systems: &mut [Box<dyn System>],
+    systems: &mut [System],
     full: &TensorMap,
     samples: &Labels,
 ) {
@@ -183,7 +183,7 @@ fn check_compute_partial_samples(
 
 fn check_compute_partial_both(
     calculator: &mut Calculator,
-    systems: &mut [Box<dyn System>],
+    systems: &mut [System],
     full: &TensorMap,
     samples: &Labels,
     properties: &Labels,
@@ -265,17 +265,17 @@ pub fn finite_differences_positions(mut calculator: Calculator, system: &SimpleS
         gradients: &["positions"],
         ..Default::default()
     };
-    let reference = calculator.compute(&mut [Box::new(system.clone())], calculation_options).unwrap();
+    let reference = calculator.compute(&mut [System::new(system.clone())], calculation_options).unwrap();
 
     for atom_i in 0..system.size().unwrap() {
         for spatial in 0..3 {
             let mut system_pos = system.clone();
             system_pos.positions_mut()[atom_i][spatial] += options.displacement / 2.0;
-            let updated_pos = calculator.compute(&mut [Box::new(system_pos)], Default::default()).unwrap();
+            let updated_pos = calculator.compute(&mut [System::new(system_pos)], Default::default()).unwrap();
 
             let mut system_neg = system.clone();
             system_neg.positions_mut()[atom_i][spatial] -= options.displacement / 2.0;
-            let updated_neg = calculator.compute(&mut [Box::new(system_neg)], Default::default()).unwrap();
+            let updated_neg = calculator.compute(&mut [System::new(system_neg)], Default::default()).unwrap();
 
             assert_eq!(updated_pos.keys(), reference.keys());
             assert_eq!(updated_neg.keys(), reference.keys());
@@ -326,7 +326,7 @@ pub fn finite_differences_cell(mut calculator: Calculator, system: &SimpleSystem
         gradients: &["cell"],
         ..Default::default()
     };
-    let reference = calculator.compute(&mut [Box::new(system.clone())], calculation_options).unwrap();
+    let reference = calculator.compute(&mut [System::new(system.clone())], calculation_options).unwrap();
     let original_cell = system.cell().unwrap().matrix();
     let original_cell_inverse = original_cell.inverse();
 
@@ -340,7 +340,7 @@ pub fn finite_differences_cell(mut calculator: Calculator, system: &SimpleSystem
             for position in system_pos.positions_mut() {
                 *position = deformed_cell * (original_cell_inverse * *position);
             }
-            let updated_pos = calculator.compute(&mut [Box::new(system_pos)], Default::default()).unwrap();
+            let updated_pos = calculator.compute(&mut [System::new(system_pos)], Default::default()).unwrap();
 
             deformed_cell[spatial_1][spatial_2] -= options.displacement;
 
@@ -349,7 +349,7 @@ pub fn finite_differences_cell(mut calculator: Calculator, system: &SimpleSystem
             for position in system_neg.positions_mut() {
                 *position = deformed_cell * (original_cell_inverse * *position);
             }
-            let updated_neg = calculator.compute(&mut [Box::new(system_neg)], Default::default()).unwrap();
+            let updated_neg = calculator.compute(&mut [System::new(system_neg)], Default::default()).unwrap();
 
             for (block_i, (_, block)) in reference.iter().enumerate() {
                 let gradients = &block.gradient("cell").unwrap();

@@ -65,7 +65,7 @@ impl CalculatorBase for NeighborList {
         std::slice::from_ref(&self.cutoff)
     }
 
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         assert!(self.cutoff > 0.0 && self.cutoff.is_finite());
 
         if self.full_neighbor_list {
@@ -85,7 +85,7 @@ impl CalculatorBase for NeighborList {
         return vec!["structure", "first_atom", "second_atom", "cell_shift_a", "cell_shift_b", "cell_shift_c"];
     }
 
-    fn samples(&self, keys: &Labels, systems: &mut [Box<dyn System>]) -> Result<Vec<Labels>, Error> {
+    fn samples(&self, keys: &Labels, systems: &mut [System]) -> Result<Vec<Labels>, Error> {
         assert!(self.cutoff > 0.0 && self.cutoff.is_finite());
 
         if self.full_neighbor_list {
@@ -109,7 +109,7 @@ impl CalculatorBase for NeighborList {
         }
     }
 
-    fn positions_gradient_samples(&self, _keys: &Labels, samples: &[Labels], _systems: &mut [Box<dyn System>]) -> Result<Vec<Labels>, Error> {
+    fn positions_gradient_samples(&self, _keys: &Labels, samples: &[Labels], _systems: &mut [System]) -> Result<Vec<Labels>, Error> {
         let mut results = Vec::new();
 
         for block_samples in samples {
@@ -147,7 +147,7 @@ impl CalculatorBase for NeighborList {
     }
 
     #[time_graph::instrument(name = "NeighborList::compute")]
-    fn compute(&mut self, systems: &mut [Box<dyn System>], descriptor: &mut TensorMap) -> Result<(), Error> {
+    fn compute(&mut self, systems: &mut [System], descriptor: &mut TensorMap) -> Result<(), Error> {
         if self.full_neighbor_list {
             FullNeighborList {
                 cutoff: self.cutoff,
@@ -171,7 +171,7 @@ struct HalfNeighborList {
 }
 
 impl HalfNeighborList {
-    fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         let mut all_species_pairs = BTreeSet::new();
         for system in systems {
             system.compute_neighbors(self.cutoff)?;
@@ -199,7 +199,7 @@ impl HalfNeighborList {
         return Ok(keys.finish());
     }
 
-    fn samples(&self, keys: &Labels, systems: &mut [Box<dyn System>]) -> Result<Vec<Labels>, Error> {
+    fn samples(&self, keys: &Labels, systems: &mut [System]) -> Result<Vec<Labels>, Error> {
         let mut results = Vec::new();
 
         for [species_first, species_second] in keys.iter_fixed_size() {
@@ -267,7 +267,7 @@ impl HalfNeighborList {
         return Ok(results);
     }
 
-    fn compute(&mut self, systems: &mut [Box<dyn System>], descriptor: &mut TensorMap) -> Result<(), Error> {
+    fn compute(&mut self, systems: &mut [System], descriptor: &mut TensorMap) -> Result<(), Error> {
         for (system_i, system) in systems.iter_mut().enumerate() {
             system.compute_neighbors(self.cutoff)?;
             let species = system.species()?;
@@ -372,7 +372,7 @@ pub struct FullNeighborList {
 
 impl FullNeighborList {
     /// Get the list of keys for these systems (list of pair species present in the systems)
-    pub(crate) fn keys(&self, systems: &mut [Box<dyn System>]) -> Result<Labels, Error> {
+    pub(crate) fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         let mut all_species_pairs = BTreeSet::new();
         for system in systems {
             system.compute_neighbors(self.cutoff)?;
@@ -400,7 +400,7 @@ impl FullNeighborList {
         return Ok(keys.finish());
     }
 
-    pub(crate) fn samples(&self, keys: &Labels, systems: &mut [Box<dyn System>]) -> Result<Vec<Labels>, Error> {
+    pub(crate) fn samples(&self, keys: &Labels, systems: &mut [System]) -> Result<Vec<Labels>, Error> {
         let mut results = Vec::new();
 
         for &[species_first, species_second] in keys.iter_fixed_size() {
@@ -495,7 +495,7 @@ impl FullNeighborList {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn compute(&mut self, systems: &mut [Box<dyn System>], descriptor: &mut TensorMap) -> Result<(), Error> {
+    fn compute(&mut self, systems: &mut [System], descriptor: &mut TensorMap) -> Result<(), Error> {
         for (system_i, system) in systems.iter_mut().enumerate() {
             system.compute_neighbors(self.cutoff)?;
             let species = system.species()?;
