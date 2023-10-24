@@ -1,0 +1,542 @@
+use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+
+use ndarray::s;
+use rayon::prelude::*;
+
+use metatensor::{LabelsBuilder, Labels, LabelValue};
+use metatensor::TensorMap;
+
+use crate::{Error, System};
+
+use crate::labels::{SamplesBuilder, SpeciesFilter, BondCenteredSamples};
+use crate::labels::{KeysBuilder, TwoCentersSingleNeighborsSpeciesKeys};
+
+use super::super::CalculatorBase;
+
+use super::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
+use super::spherical_expansion_pair::GradientsOptions;
+
+use super::super::{split_tensor_map_by_system, array_mut_for_system};
+
+
+/// The actual calculator used to compute SOAP spherical expansion coefficients
+#[derive(Debug)]
+pub struct SphericalExpansionForBonds {
+    /// Underlying calculator, computing spherical expansion on pair at the time
+    by_type: SphericalExpansionForBondType,
+    // /// Cache for (-1)^l values
+    //m_1_pow_l: Vec<f64>,
+}
+
+impl SphericalExpansionForBonds {
+    /// Create a new `SphericalExpansion` calculator with the given parameters
+    pub fn new(parameters: SphericalExpansionForBondsParameters) -> Result<Self, Error> {
+        // let m_1_pow_l = (0..=parameters.max_angular)
+        //     .map(|l| f64::powi(-1.0, l as i32))
+        //     .collect::<Vec<f64>>();
+
+        return Ok(Self {
+            by_type: SphericalExpansionForBondType::new(parameters)?,
+            //m_1_pow_l,
+        });
+    }
+}   
+
+impl CalculatorBase for SphericalExpansionForBonds {
+    fn name(&self) -> String {
+        "spherical expansion".into()
+    }
+    
+    fn cutoffs(&self) -> &[f64] {
+        &self.by_type.parameters.cutoffs
+    }
+
+    fn parameters(&self) -> String {
+        serde_json::to_string(self.by_type.parameters()).expect("failed to serialize to JSON")
+    }
+
+    fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
+        let builder = TwoCentersSingleNeighborsSpeciesKeys {
+            cutoffs: self.by_type.parameters.cutoffs,
+            self_contributions: true,
+            raw_triplets: &self.by_type.distance_calculator.raw_triplets,
+        };
+        let keys = builder.keys(systems)?;
+
+        let mut builder = LabelsBuilder::new(vec!["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+        for &[species_center_1, species_center_2, species_neighbor] in keys.iter_fixed_size() {
+            for spherical_harmonics_l in 0..=self.by_type.parameters().max_angular {
+                builder.add(&[spherical_harmonics_l.into(), species_center_1, species_center_2, species_neighbor]);
+            }
+        }
+
+        return Ok(builder.finish());
+    }
+
+    fn sample_names(&self) -> Vec<&str> {
+        BondCenteredSamples::sample_names()
+    }
+
+    fn samples(&self, keys: &Labels, systems: &mut [System]) -> Result<Vec<Labels>, Error> {
+        assert_eq!(keys.names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+
+        // only compute the samples once for each `species_center, species_neighbor`,
+        // and re-use the results across `spherical_harmonics_l`.
+        let mut samples_per_species = BTreeMap::new();
+        for [_, species_center_1, species_center_2, species_neighbor] in keys.iter_fixed_size() {
+            if samples_per_species.contains_key(&(species_center_1, species_center_2, species_neighbor)) {
+                continue;
+            }
+
+            let builder = BondCenteredSamples {
+                cutoffs: self.by_type.parameters().cutoffs,
+                species_center_1: SpeciesFilter::Single(species_center_1.i32()),
+                species_center_2: SpeciesFilter::Single(species_center_2.i32()),
+                species_neighbor: SpeciesFilter::Single(species_neighbor.i32()),
+                self_contributions: true,
+                raw_triplets: &self.by_type.distance_calculator.raw_triplets,
+            };
+
+            samples_per_species.insert((species_center_1, species_center_2, species_neighbor), builder.samples(systems)?);
+        }
+
+        let mut result = Vec::new();
+        for [_, species_center_1, species_center_2, species_neighbor] in keys.iter_fixed_size() {
+            let samples = samples_per_species.get(
+                &(species_center_1, species_center_2, species_neighbor)
+            ).expect("missing samples");
+
+            result.push(samples.clone());
+        }
+
+        return Ok(result);
+    }
+
+    fn supports_gradient(&self, parameter: &str) -> bool {
+        self.by_type.supports_gradient(parameter)
+    }
+
+    fn positions_gradient_samples(&self, keys: &Labels, samples: &[Labels], systems: &mut [System]) -> Result<Vec<Labels>, Error> {
+        assert_eq!(keys.names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+        assert_eq!(keys.count(), samples.len());
+
+        let mut gradient_samples = Vec::new();
+        for ([_, species_center_1, species_center_2, species_neighbor], samples) in keys.iter_fixed_size().zip(samples) {
+            // TODO: we don't need to rebuild the gradient samples for different
+            // spherical_harmonics_l
+            let builder = BondCenteredSamples {
+                cutoffs: self.by_type.parameters().cutoffs,
+                species_center_1: SpeciesFilter::Single(species_center_1.i32()),
+                species_center_2: SpeciesFilter::Single(species_center_2.i32()),
+                species_neighbor: SpeciesFilter::Single(species_neighbor.i32()),
+                self_contributions: true,
+                raw_triplets: &self.by_type.distance_calculator.raw_triplets,
+            };
+
+            gradient_samples.push(builder.gradients_for(systems, samples)?);
+        }
+
+        return Ok(gradient_samples);
+    }
+
+    fn components(&self, keys: &Labels) -> Vec<Vec<Labels>> {
+        assert_eq!(keys.names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+
+        // only compute the components once for each `spherical_harmonics_l`,
+        // and re-use the results across `species_center, species_neighbor`.
+        let mut component_by_l = BTreeMap::new();
+        for [spherical_harmonics_l, _, _, _] in keys.iter_fixed_size() {
+            if component_by_l.contains_key(spherical_harmonics_l) {
+                continue;
+            }
+
+            let mut component = LabelsBuilder::new(vec!["spherical_harmonics_m"]);
+            for m in -spherical_harmonics_l.i32()..=spherical_harmonics_l.i32() {
+                component.add(&[LabelValue::new(m)]);
+            }
+
+            let components = vec![component.finish()];
+            component_by_l.insert(*spherical_harmonics_l, components);
+        }
+
+        let mut result = Vec::new();
+        for [spherical_harmonics_l, _, _, _] in keys.iter_fixed_size() {
+            let components = component_by_l.get(spherical_harmonics_l).expect("missing samples");
+            result.push(components.clone());
+        }
+        return result;
+    }
+
+    fn property_names(&self) -> Vec<&str> {
+        vec!["n"]
+    }
+
+    fn properties(&self, keys: &Labels) -> Vec<Labels> {
+        let mut properties = LabelsBuilder::new(self.property_names());
+        for n in 0..self.by_type.parameters().max_radial {
+            properties.add(&[n]);
+        }
+        let properties = properties.finish();
+
+        return vec![properties; keys.count()];
+    }
+
+    #[time_graph::instrument(name = "SphericalExpansion::compute")]
+    fn compute(&mut self, systems: &mut [System], descriptor: &mut TensorMap) -> Result<(), Error> {
+        assert_eq!(descriptor.keys().names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+        if descriptor.blocks().len() == 0 {
+            return Ok(());
+        }
+        
+        let max_angular = self.by_type.parameters().max_angular;
+        let l_slices: Vec<_> = (0..=max_angular).map(|l|{
+            let lsize = l*l;
+            let msize = 2*l+1;
+            lsize..lsize+msize
+        }).collect();
+
+        let do_gradients = GradientsOptions {
+            positions: descriptor.block_by_id(0).gradient("positions").is_some(),
+            cell: descriptor.block_by_id(0).gradient("cell").is_some(),
+        };
+        if do_gradients.positions {
+            assert!(self.by_type.supports_gradient("positions"));
+        }
+        if do_gradients.cell {
+            assert!(self.by_type.supports_gradient("cell"));
+        }
+        
+        let radial_selection = descriptor.blocks().iter().map(|b|{
+            let prop = b.properties();
+            assert_eq!(prop.names(), ["n"]);
+            prop.iter_fixed_size().map(|&[n]|n.i32()).collect::<Vec<_>>()
+        }).collect::<Vec<_>>();
+        // first, create some partial-key -> block lookup tables to avoid linear searches within blocks later
+        
+        // {(s1,s2,s3) -> i_s3}
+        let mut s1s2s3_to_is3: BTreeMap<(i32,i32,i32),usize> = BTreeMap::new();
+        // {(s1,s2) -> [i_s3->(s3,[l->i_block])]}
+        let mut s1s2_to_block_ids: BTreeMap<(i32,i32),Vec<(i32,Vec<usize>)>> = BTreeMap::new();
+        
+        for (block_i, &[l, s1,s2,s3]) in descriptor.keys().iter_fixed_size().enumerate(){
+            let s1=s1.i32();
+            let s2=s2.i32();
+            let s3=s3.i32();
+            let l=l.usize();
+            let s1s2_blocks = s1s2_to_block_ids.entry((s1,s2))
+                .or_insert_with(Vec::new);
+            let l_blocks = match s1s2s3_to_is3.entry((s1,s2,s3)) {
+                Entry::Occupied(i_s3_e) => {
+                    let (s3_b, l_blocks) = & mut s1s2_blocks[*i_s3_e.get()];
+                    debug_assert_eq!(s3_b,&s3);
+                    l_blocks
+                },
+                Entry::Vacant(i_s3_e) => {
+                    let i_s3 = s1s2_blocks.len();
+                    i_s3_e.insert(i_s3);
+                    s1s2_blocks.push((s3,vec![usize::MAX;max_angular+1]));
+                    &mut s1s2_blocks[i_s3].1
+                },
+            };
+            l_blocks[l] = block_i;
+        }
+        
+        #[cfg(debug_assertions)]{
+            for block in descriptor.blocks() {
+                assert_eq!(block.samples().names(), ["structure", "first_center", "second_center", "bond_i"]);
+            }
+        }
+        let mut descriptors_by_system = split_tensor_map_by_system(descriptor, systems.len());
+
+        systems.par_iter_mut()
+            .zip_eq(&mut descriptors_by_system)
+            .try_for_each(|(system, descriptor)|
+        {
+            //system.compute_triplet_neighbors(self.by_type.parameters().bond_cutoff(), self.by_type.parameters().third_cutoff())?;
+            self.by_type.distance_calculator.raw_triplets.ensure_computed_for_system(system)?;
+            let triplets = self.by_type.distance_calculator.raw_triplets.get_for_system(system, false)?;
+            let species = system.species()?;
+            
+            for ((s1,s2),s1s2_blocks) in s1s2_to_block_ids.iter() {    
+                let (s3_list,per_s3_blocks): (Vec<i32>,Vec<&Vec<_>>) = s1s2_blocks.iter().map(
+                    |(s3,blocks)|(*s3,blocks)
+                ).unzip();
+                // half-assume that blocks that share s1,s2,s3 have the same sample list
+                #[cfg(debug_assertions)]{
+                    for (_s3,s3blocks) in s1s2_blocks.iter(){
+                        debug_assert!(s3blocks.len()>0);
+                        let mut s3goodblocks = s3blocks.iter().filter(|b_i|(**b_i)!=usize::MAX);
+                        let first_goodblock = s3goodblocks.next();
+                        debug_assert!(first_goodblock.is_some());
+                        
+                        let samples_n = descriptor.block_by_id(*first_goodblock.unwrap()).samples().size();
+                        for lblock in s3goodblocks {
+                            debug_assert_eq!(descriptor.block_by_id(*lblock).samples().size(), samples_n);
+                        }
+                    }
+                }
+                // {bond_i->(i_s3,sample_i)}
+                let mut s3_samples = vec![];
+                let mut sample_lut: BTreeMap<usize,Vec<(usize,usize)>> = BTreeMap::new();
+                
+                // also assume that the systems are in order in the samples
+                for (i_s3, s3blocks) in per_s3_blocks.into_iter().enumerate() {
+                    let first_good_block = s3blocks.iter().filter(|b_i|**b_i!=usize::MAX).next().unwrap();
+                    let samples = descriptor.block_by_id(*first_good_block).samples();
+                    for (sample_i, &[_system_i,_atom_1,_atom_2,bond_i]) in samples.iter_fixed_size().enumerate(){
+                        match sample_lut.entry(bond_i.usize()) {
+                            Entry::Vacant(e) => {
+                                e.insert(vec![(i_s3,sample_i)]);
+                            },
+                            Entry::Occupied(mut e) => {
+                                e.get_mut().push((i_s3,sample_i));
+                            },
+                        }
+                    }
+                    s3_samples.push(samples);
+                }
+                for (triplet_i,inverted,contribution) in self.by_type.get_coefficients_for(system, *s1, *s2, &s3_list, do_gradients)? {
+                    let triplet = &triplets[triplet_i];
+                    
+                    #[cfg(debug_assertions)]{
+                        if triplet.atom_i == triplet.atom_j{
+                            unimplemented!("cannot deal with bonds formed of self-images quite yet.")
+                        }
+                    }
+                    
+                    let contribution = contribution.borrow();
+                    let these_samples = match sample_lut.get(&triplet.bond_i){
+                        None => {continue;},
+                        Some(a) => a,
+                    };
+
+                    for (i_s3,sample_i) in these_samples.iter(){
+                        if s3_list[*i_s3] != species[triplet.atom_k] {
+                            continue  // this triplet does not contribute to this block
+                        }
+                        let sample = &s3_samples[*i_s3][*sample_i];
+                        let (atom_1,atom_2) = (sample[1],sample[2]);
+                        if (!inverted) && triplet.atom_i != atom_1.usize(){
+                            continue;
+                        } else if inverted && triplet.atom_i != atom_2.usize(){
+                            continue;
+                        }
+                        
+                        let ret_blocks = &s1s2_blocks[*i_s3].1;
+                        for (l,lslice) in l_slices.iter().enumerate() {
+                            let block_i = ret_blocks[l];
+                            if block_i == usize::MAX {
+                                continue;
+                            }
+                            let mut block = descriptor.block_mut_by_id(block_i);
+                            let mut array = array_mut_for_system(block.values_mut());
+                            let mut value_slice = array.slice_mut(s![*sample_i,..,..]);
+                            let input_slice = contribution.values.slice(s![lslice.clone(),..]);
+                            for (n_i,n) in radial_selection[block_i].iter().enumerate() {
+                                let mut value_slice = value_slice.slice_mut(s![..,n_i]);
+                                value_slice += &input_slice.slice(s![..,*n]);
+                            }
+
+                        }
+                    }
+                }
+            }
+            Ok::<_, Error>(())
+        })?;
+
+        Ok(())
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use ndarray::ArrayD;
+    use metatensor::{Labels, TensorBlock, EmptyArray, LabelsBuilder, TensorMap};
+
+    use crate::systems::test_utils::{test_systems};
+    use crate::{Calculator, CalculationOptions, LabelsSelection};
+    use crate::calculators::CalculatorBase;
+
+    use super::{SphericalExpansionForBonds, SphericalExpansionForBondsParameters};
+    use super::super::{CutoffFunction, RadialScaling};
+    use crate::calculators::radial_basis::RadialBasis;
+
+
+    fn parameters() -> SphericalExpansionForBondsParameters {
+        SphericalExpansionForBondsParameters {
+            cutoffs: [3.5,3.5],
+            max_radial: 6,
+            max_angular: 6,
+            atomic_gaussian_width: 0.3,
+            center_atoms_weight: 10.0,
+            radial_basis: RadialBasis::splined_gto(1e-8),
+            radial_scaling: RadialScaling::Willatt2018 { scale: 1.5, rate: 0.8, exponent: 2.0},
+            cutoff_function: CutoffFunction::ShiftedCosine { width: 0.5 },
+        }
+    }
+
+    #[test]
+    fn values() {
+        let mut calculator = Calculator::from(Box::new(SphericalExpansionForBonds::new(
+            parameters()
+        ).unwrap()) as Box<dyn CalculatorBase>);
+
+        let mut systems = test_systems(&["water"]);
+        let descriptor = calculator.compute(&mut systems, Default::default()).unwrap();
+
+        for l in 0..6 {
+            for species_center1 in [1, -42] {
+                for species_center2 in [1, -42] {
+                    if species_center1==-42 && species_center2==-42 {
+                        continue;
+                    }
+                    for species_neighbor in [1, -42] {
+                        let block_i = descriptor.keys().position(&[
+                            l.into(), species_center1.into(), species_center2.into(), species_neighbor.into()
+                        ]);
+                        assert!(block_i.is_some());
+                        let block = &descriptor.block_by_id(block_i.unwrap());
+                        let array = block.values().to_array();
+                        assert_eq!(array.shape().len(), 3);
+                        assert_eq!(array.shape()[1], 2 * l + 1);
+                    }
+                }
+            }
+        }
+
+        // exact values for spherical expansion are regression-tested in
+        // `rascaline/tests/spherical-expansion.rs`
+    }
+
+    #[test]
+    fn compute_partial() {
+        let calculator = Calculator::from(Box::new(SphericalExpansionForBonds::new(
+            SphericalExpansionForBondsParameters {
+                max_angular: 2,
+                ..parameters()
+            }
+        ).unwrap()) as Box<dyn CalculatorBase>);
+
+        let mut systems = test_systems(&["water"]);
+
+        let properties = Labels::new(["n"], &[
+            [0],
+            [3],
+            [2],
+        ]);
+
+        let samples = Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
+            [0, 0, 2, 1],
+            [0, 0, 1, 0],
+            //[0, 1, 2, 2],  // excluding this one
+        ]);
+
+        let keys = Labels::new(["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"], &[
+            [0, -42, 1, -42],
+            [2, -42, 1, -42],
+            [0, 1, -42, -42],
+            [0, 1, 1, -42],
+            [0, 6, 1, 1], // not part of the default keys
+            [1, -42, 1, -42],
+            [1, -42, 1, 1],
+            [1, 1, -42, 1],
+            [0, -42, 1, 1],
+            [1, 1, 1, -42],
+            [2, -42, 1, 1],
+            [0, 1, 1, 1],
+            [2, 1, -42, -42],
+            [1, 1, 1, 1],
+            [2, 1, 1, -42],
+            [0, 1, -42, 1],
+            [2, 1, -42, 1],
+            [2, 1, 1, 1],
+            [1, 1, -42, -42],
+        ]);
+
+        crate::calculators::tests_utils::compute_partial(
+            calculator, &mut systems, &keys, &samples, &properties
+        );
+    }
+
+    #[test]
+    fn non_existing_samples() {
+        let mut calculator = Calculator::from(Box::new(SphericalExpansionForBonds::new(
+            parameters()
+        ).unwrap()) as Box<dyn CalculatorBase>);
+
+        let mut systems = test_systems(&["water"]);
+
+        // include the three atoms in all blocks, regardless of the
+        // species_center key.
+        let block = TensorBlock::new(
+            EmptyArray::new(vec![3, 1]),
+            &Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
+                [0, 0, 2, 1],
+                [0, 1, 2, 2],
+                [0, 0, 1, 0],
+            ]),
+            &[],
+            &Labels::single(),
+        ).unwrap();
+
+        let mut keys = LabelsBuilder::new(vec!["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+        let mut blocks = Vec::new();
+        for l in 0..(parameters().max_angular + 1) as isize {
+            for species_center1 in [1, -42] {
+                for species_center2 in [1, -42] {
+                    for species_neighbor in [1, -42] {
+                        keys.add(&[l, species_center1, species_center2, species_neighbor]);
+                        blocks.push(block.as_ref().try_clone().unwrap());
+                    }
+                }
+            }
+        }
+        let select_all_samples = TensorMap::new(keys.finish(), blocks).unwrap();
+
+        let options = CalculationOptions {
+            selected_samples: LabelsSelection::Predefined(&select_all_samples),
+            ..Default::default()
+        };
+        let descriptor = calculator.compute(&mut systems, options).unwrap();
+
+        // get the block for oxygen
+        assert_eq!(descriptor.keys().names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+        assert_eq!(descriptor.keys()[0], [0, -42, 1, -42]);
+
+        let block = descriptor.block_by_id(0);
+        let block = block.data();
+
+        // entries centered on H atoms should be zero
+        assert_eq!(
+            *block.samples,
+            Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
+                [0, 0, 2, 1],
+                [0, 1, 2, 2],  // the sample that doesn't exist
+                [0, 0, 1, 0],
+            ])
+        );
+        let array = block.values.as_array();
+        assert_eq!(array.index_axis(ndarray::Axis(0), 1), ArrayD::from_elem(vec![1, 6], 0.0));
+
+        // get the block for hydrogen
+        assert_eq!(descriptor.keys().names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
+        assert_eq!(descriptor.keys()[21], [0, 1, -42, 1]);
+
+        let block = descriptor.block_by_id(21);
+        let block = block.data();
+
+        // entries centered on O atoms should be zero
+        assert_eq!(
+            *block.samples,
+            Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
+                [0, 0, 2, 1],
+                [0, 1, 2, 2],
+                [0, 0, 1, 0],
+            ])
+        );
+        let array = block.values.as_array();
+        assert_eq!(array.index_axis(ndarray::Axis(0), 0), ArrayD::from_elem(vec![1, 6], 0.0));
+    }
+}

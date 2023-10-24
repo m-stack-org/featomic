@@ -84,6 +84,9 @@ pub use self::sorted_distances::SortedDistances;
 mod neighbor_list;
 pub use self::neighbor_list::NeighborList;
 
+mod bondatom_neighbor_list;
+pub use self::bondatom_neighbor_list::BANeighborList;
+
 mod radial_basis;
 pub use self::radial_basis::{RadialBasis, GtoRadialBasis};
 
@@ -93,6 +96,8 @@ pub(crate) use self::descriptors_by_systems::{array_mut_for_system, split_tensor
 pub mod soap;
 pub use self::soap::{SphericalExpansionByPair, SphericalExpansionParameters};
 pub use self::soap::SphericalExpansion;
+pub use self::soap::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
+pub use self::soap::SphericalExpansionForBonds;
 pub use self::soap::{SoapPowerSpectrum, PowerSpectrumParameters};
 pub use self::soap::{SoapRadialSpectrum, RadialSpectrumParameters};
 

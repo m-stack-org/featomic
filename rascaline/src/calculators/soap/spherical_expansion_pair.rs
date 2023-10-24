@@ -79,12 +79,12 @@ pub struct SphericalExpansionByPair {
     pub(crate) parameters: SphericalExpansionParameters,
     /// implementation + cached allocation to compute the radial integral for a
     /// single pair
-    radial_integral: ThreadLocal<RefCell<SoapRadialIntegralCache>>,
+    pub(super) radial_integral: ThreadLocal<RefCell<SoapRadialIntegralCache>>,
     /// implementation + cached allocation to compute the spherical harmonics
     /// for a single pair
-    spherical_harmonics: ThreadLocal<RefCell<SphericalHarmonicsCache>>,
+    pub(super) spherical_harmonics: ThreadLocal<RefCell<SphericalHarmonicsCache>>,
     /// Cache for (-1)^l values
-    m_1_pow_l: Vec<f64>,
+    pub(super) m_1_pow_l: Vec<f64>,
 }
 
 impl std::fmt::Debug for SphericalExpansionByPair {
@@ -193,14 +193,14 @@ impl SphericalExpansionByPair {
     }
 
     /// Compute the product of radial scaling & cutoff smoothing functions
-    fn scaling_functions(&self, r: f64) -> f64 {
+    pub(super) fn scaling_functions(&self, r: f64) -> f64 {
         let cutoff = self.parameters.cutoff_function.compute(r, self.parameters.cutoff);
         let scaling = self.parameters.radial_scaling.compute(r);
         return cutoff * scaling;
     }
 
     /// Compute the gradient of the product of radial scaling & cutoff smoothing functions
-    fn scaling_functions_gradient(&self, r: f64) -> f64 {
+    pub(super) fn scaling_functions_gradient(&self, r: f64) -> f64 {
         let cutoff = self.parameters.cutoff_function.compute(r, self.parameters.cutoff);
         let cutoff_grad = self.parameters.cutoff_function.derivative(r, self.parameters.cutoff);
 
