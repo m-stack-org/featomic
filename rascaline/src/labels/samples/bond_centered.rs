@@ -16,9 +16,7 @@ use super::super::super::pre_calculators::BATripletNeighborList;
 /// optionally filtering on the neighbor atom species.
 pub struct BondCenteredSamples<'a> {
     /// spherical cutoff radius used to construct the atom-centered environments
-    pub cutoffs: [f64;2],  // bond_, third_cutoff
-    //pub bond_cutoff: f64,
-    //pub third_cutoff: f64,
+    pub cutoffs: [f64;2],
     /// Filter for the central atom species
     pub species_center_1: SpeciesFilter,
     pub species_center_2: SpeciesFilter,

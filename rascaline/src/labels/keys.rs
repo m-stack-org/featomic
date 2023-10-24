@@ -99,9 +99,7 @@ impl KeysBuilder for CenterSingleNeighborsSpeciesKeys {
 /// and the species of a third, neighbor atom, within a cutoff of the first two.
 pub struct TwoCentersSingleNeighborsSpeciesKeys<'a> {
     /// Spherical cutoff to use when searching for neighbors around an atom
-    pub(crate) cutoffs: [f64;2],  // bond_, third_cutoff
-    //pub bond_cutoff: f64,
-    //pub third_cutoff: f64,
+    pub(crate) cutoffs: [f64;2],
     /// Should we consider an atom to be it's own neighbor or not?
     pub self_contributions: bool,
     pub raw_triplets: &'a BATripletNeighborList,
@@ -123,7 +121,6 @@ impl<'a> KeysBuilder for TwoCentersSingleNeighborsSpeciesKeys<'a> {
 
         let mut all_species_triplets = BTreeSet::new();
         for system in systems {
-            //system.compute_triplet_neighbors(self.bond_cutoff(), self.third_cutoff())?;
             self.raw_triplets.ensure_computed_for_system(system)?;
 
             let species = system.species()?;

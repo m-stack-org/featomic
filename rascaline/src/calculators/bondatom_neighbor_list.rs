@@ -162,38 +162,40 @@ fn rotate_vector_to_z_derivatives(vec: Vector3D) -> (Matrix3,Matrix3,Matrix3) {
 
 
 
-/// TODO fix docstring
-/// This calculator computes the neighbor list for a given spherical cutoff, and
-/// returns the list of distance vectors between all pairs of atoms strictly
-/// inside the cutoff.
+/// Manages a list of 'neighbors', where one neighbor is the center of a pair of atoms
+/// (first and second atom), and the other neighbor is a simple atom (third atom).
+/// Both the length of the bond and the distance between neighbors are subjected to a spherical cutoff.
+/// 
+/// Unlike the corresponding pre_calculator, this calculator focuses on storing
+/// the canonical-orientation vector between bond and atom, rather than the bond vector and 'third vector'.
 ///
 /// Users can request either a "full" neighbor list (including an entry for both
-/// `i - j` pairs and `j - i` pairs) or save memory/computational by only
-/// working with "half" neighbor list (only including one entry for each `i/j`
-/// pair)
+/// `i - j` bonds and `j - i` bonds) or save memory/computational by only
+/// working with "half" neighbor list (only including one entry for each `i - j`
+/// bond)
+/// if memory is saved, the order of i and j is that the atom with
+/// the smallest Z (or species ID in general) comes first.
 ///
-/// Self pairs (pairs between an atom and periodic copy itself) can appear when
-/// the cutoff is larger than the cell under periodic boundary conditions. Self
-/// pairs with a distance of 0 are not included in this calculator, even though
-/// they are required when computing SOAP.
+/// The two first atoms must not be the same atom, but the third atom may be one of them,
+/// if the `bond_conbtribution` option is active
+/// (When periodic boundaries arise, atom which  must not be the same may be images of each other.)
 ///
 /// This sample produces a single property (`"distance"`) with three components
 /// (`"vector_direction"`) containing the x, y, and z component of the vector from
-/// the first atom in the pair to the second. In addition to the atom indexes,
-/// the samples also contain a pair index, to be able to distinguish between
-/// multiple pairs between the same atom (if the cutoff is larger than the
-/// cell).
+/// the center of the triplet's 'bond' to the triplet's 'third atom', in the bond's canonical orientation.
+/// 
+/// In addition to the atom indexes, the samples also contain a pair and triplet index,
+/// to be able to distinguish between multiple triplets involving the same atoms
+/// (which can occur in periodic boundary conditions when the cutoffs are larger than the unit cell).
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct BANeighborList {
     /// the pre-calculator responsible for making a raw enumeration of the system's bond-atom triplets
     pub raw_triplets: BATripletNeighborList,
-    /// Should individual atoms be considered their own neighbor? Setting this
-    /// to `true` will add "self pairs", i.e. pairs between an atom and itself,
-    /// with the distance 0. The `pair_i` of such pairs is set to -1.
+    /// Should we include triplets where the third atom is one of the bond's atoms?
     pub bond_contribution: bool,
-    /// Should we compute a full neighbor list (each pair appears twice, once as
-    /// `i-j` and once as `j-i`), or a half neighbor list (each pair only
+    /// Should we compute a full neighbor list (each triplet appears twice, once as
+    /// `i-j +k` and once as `j-i +k`), or a half neighbor list (each triplet only
     /// appears once, (such that `species_i <= species_j`))
     pub use_half_enumeration: bool,
 }
@@ -224,11 +226,7 @@ impl BANeighborList {
         self.raw_triplets.third_cutoff()
     }
 
-    /// validate that the cutoffs make sense
-    fn validate_cutoffs(&self) {
-        self.raw_triplets.validate_cutoffs()
-    }
-    
+    /// a "flatter" initialisation method than the structure-based one
     pub fn from_params(cutoffs: [f64;2], use_half_enumeration: bool, bond_contribution: bool) -> Self {
         Self{
             raw_triplets: BATripletNeighborList {
@@ -239,7 +237,8 @@ impl BANeighborList {
         }
     }
     
-    
+    /// the core of the calculation being done here:
+    /// computing the canonical-orientation vector and distance of a given bond-atom triplet.
     pub(super) fn compute_single_triplet(
         triplet: &BATripletInfo,
         invert: bool,
@@ -334,6 +333,8 @@ impl BANeighborList {
         return Ok(res);
     }
     
+    /// get the canonical-orientation vector and distance of a triplet
+    /// and store it in a TensorBlock
     fn compute_single_triplet_inplace(
         triplet: &BATripletInfo,
         out_block: &mut TensorBlockRefMut,
@@ -400,8 +401,6 @@ impl CalculatorBase for BANeighborList {
     }
 
     fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
-        self.validate_cutoffs();
-    
         let mut all_species_triplets = BTreeSet::new();
         for system in systems {
             self.raw_triplets.ensure_computed_for_system(system)?;
@@ -437,7 +436,6 @@ impl CalculatorBase for BANeighborList {
     }
 
     fn samples(&self, keys: &Labels, systems: &mut [System]) -> Result<Vec<Labels>, Error> {
-        self.validate_cutoffs();
         let mut results = Vec::new();
 
         for &[species_first, species_second, species_third] in keys.iter_fixed_size() {

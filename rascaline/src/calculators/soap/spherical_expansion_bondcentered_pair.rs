@@ -30,21 +30,21 @@ use super::spherical_expansion_pair::{
     PairContribution
 };
 
-/// Parameters for spherical expansion calculator.
+/// Parameters for spherical expansion calculator for bond-centered neighbor densities.
 ///
-/// The spherical expansion is at the core of representations in the SOAP
+/// (The spherical expansion is at the core of representations in the SOAP
 /// (Smooth Overlap of Atomic Positions) family. See [this review
 /// article](https://doi.org/10.1063/1.5090481) for more information on the SOAP
 /// representation, and [this paper](https://doi.org/10.1063/5.0044689) for
-/// information on how it is implemented in rascaline.
+/// information on how it is implemented in rascaline.)
+///
+/// This calculator is only needed to characterize local environments that are centered
+/// on a pair of atoms rather than a single one.
 #[derive(Debug, Clone)]
 #[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SphericalExpansionForBondsParameters {
     /// Spherical cutoffs to use for atomic environments
-    pub(super) cutoffs: [f64;2],  // bond_, third_cutoff
-    //pub bond_cutoff: f64,
-    //pub third_cutoff: f64,
-    //pub compute_both_sides: bool,
+    pub(super) cutoffs: [f64;2],
     /// Number of radial basis function to use in the expansion
     pub max_radial: usize,
     /// Number of spherical harmonics to use in the expansion
@@ -277,26 +277,8 @@ impl SphericalExpansionForBondType {
         let max_radial = self.parameters.max_radial;
         let species = system.species().unwrap();
         
-        //let _ = system.triplets()?;
-        // for s3 in s3_list{
-        //     let triplets = system.triplets_with_species(s1, s2, *s3)?;
-        //     if let Err(error) = triplets {
-        //         return Err(error);
-        //     }
-        // }
         
         let pre_iter = s3_list.iter().flat_map(|s3|{
-            // let all_triplets = system.triplets().unwrap();
-            // let triplets = system.triplets_with_species(s1, s2, *s3).unwrap();
-            // triplets.iter().map(|triplet_i|{
-            //     let triplet = &all_triplets[*triplet_i];
-            //     #[cfg(debug_assertions)]{
-            //         assert_eq!(species[triplet.bond.first],s1);
-            //         assert_eq!(species[triplet.bond.second],s2);
-            //         assert_eq!(species[triplet.third],*s3);
-            //     }
-            //     (*triplet_i,triplet)
-            // })
             self.distance_calculator.raw_triplets.get_per_system_per_species(system,s1,s2,*s3,true).unwrap().into_iter()
         }).flat_map(|triplet| {
             let invert: &'static [bool] = {

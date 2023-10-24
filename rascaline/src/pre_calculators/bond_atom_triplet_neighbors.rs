@@ -48,18 +48,17 @@ pub struct BATripletInfo{
 
 
 /// Manages a list of 'neighbors', where one neighbor is the center of a pair of atoms
-/// (first and second atom), and the other neighbot is a simple atom (third atom).
+/// (first and second atom), and the other neighbor is a simple atom (third atom).
 /// Both the length of the bond and the distance between neighbors are subjected to a spherical cutoff.
 /// This pre-calculator can compute and cache this list within a given system
 /// (with two distance vectors per entry: one within the bond and one between neighbors).
 /// Then, it can re-enumerate those neighbors, either for a full system, or with restrictions on the atoms or their species.
 ///
-/// Users can request either a "full" neighbor list (including an entry for both
-/// `i - j` bonds and `j - i` bonds) or save memory/computational by only
-/// working with "half" neighbor list (only including one entry for each `i - j`
-/// bond)
+/// This saves memory/computational power by only working with "half" neighbor list
+/// This is done by only including one entry for each `i - j` bond, not both `i - j` and `j - i`.
+/// The order of i and j is that the atom with the smallest Z (or species ID in general) comes first.
 ///
-/// The two first atoms may not be the same atom, but the third atom may be one of them.
+/// The two first atoms must not be the same atom, but the third atom may be one of them.
 /// (When periodic boundaries arise, the two first atoms may be images of each other.)
 #[derive(Debug,Clone)]
 #[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
@@ -72,6 +71,7 @@ pub struct BATripletNeighborList {
     pub cutoffs: [f64;2],  // bond_, third_cutoff
 }
 
+/// the internal function doing the triplet computing itself
 fn list_raw_triplets(system: &mut dyn SystemBase, bond_cutoff: f64, third_cutoff: f64) -> Result<Vec<BATripletInfo>,Error> {
     system.compute_neighbors(bond_cutoff)?;
     let bonds = system.pairs()?.to_owned();
@@ -206,52 +206,17 @@ impl BATripletNeighborList {
     }
 
     /// validate that the cutoffs make sense
-    pub(crate) fn validate_cutoffs(&self) {  // TODO: un-pub
+    pub fn validate_cutoffs(&self) {
         let (bond_cutoff, third_cutoff) = (self.bond_cutoff(), self.third_cutoff());
         assert!(bond_cutoff > 0.0 && bond_cutoff.is_finite());
         assert!(third_cutoff >= bond_cutoff && third_cutoff.is_finite());
     }
     
+    /// internal function that deletages computing the triplets, but deals with storing them for a given system.
     fn do_compute_for_system(&self, system: &mut System) -> Result<(), Error> {
         // let triplets_raw = TripletNeighborsList::for_system(&**system, self.bond_cutoff(), self.third_cutoff())?;
         // let triplets = triplets_raw.triplets();
         let triplets = list_raw_triplets(&mut **system, self.cutoffs[0], self.cutoffs[1])?;
-
-        //let species = system.species()?;
-
-        // let triplets = triplets.into_iter().map(|tr|{
-        //     if species[tr.atom_i] <= species[tr.atom_j] {
-        //         tr
-        //     } else {
-        //         BATripletInfo{
-        //             atom_i: tr.atom_j,
-        //             atom_j: tr.atom_i,
-        //             atom_k: tr.atom_k,
-        //             bond_i: tr.bond_i,
-        //             triplet_i: tr.triplet_i,
-        //             is_self_contrib: tr.is_self_contrib,
-        //             bond_vector: tr.bond_vector.map(|v|-v),
-        //             third_vector: tr.third_vector,
-        //         }
-        //         // BATriplet{
-        //         //     bond_i: tr.bond_i,
-        //         //     bond: Pair {
-        //         //         first: tr.bond.second,
-        //         //         second: tr.bond.first,
-        //         //         distance: tr.bond.distance,
-        //         //         vector: -tr.bond.vector,
-        //         //         cell_shift_indices: {let c = &tr.bond.cell_shift_indices; [-c[0],-c[1],-c[2]]},
-        //         //     },
-        //         //     third: tr.third, third_vector: tr.third_vector,
-        //         //     is_self_contribution: tr.is_self_contribution,
-        //         //     distance: tr.distance,
-        //         //     cell_shift_indices: {
-        //         //         let (c1,c2) = (&tr.cell_shift_indices,&tr.bond.cell_shift_indices);
-        //         //         [c1[0]-c2[0],c1[1]-c2[1],c1[2]-c2[2]]
-        //         //     },
-        //         // }
-        //     }
-        // }).collect::<Vec<_>>();
 
         let components = [Labels::new(
             ["vector_pair_component"],
@@ -332,7 +297,10 @@ impl BATripletNeighborList {
         Ok(())
     }
     
+    /// check that the precalculator has computed its values for a given system,
+    /// and if not, compute them.
     pub fn ensure_computed_for_system(&self, system: &mut System) -> Result<(),Error> {
+        self.validate_cutoffs();
         'cached_path: {
             let cutoffs2: &[f64;2] = match system.data(Self::CACHE_NAME_ATTR.into()) {
                 Some(cutoff) => cutoff.downcast_ref()
@@ -349,6 +317,8 @@ impl BATripletNeighborList {
         return self.do_compute_for_system(system);
     }
     
+    /// for a given system, get a copy of all the bond-atom triplets.
+    /// optionally include the vectors tied to these triplets
     pub fn get_for_system(&self, system: &System, with_vectors: bool) -> Result<Vec<BATripletInfo>, Error>{  
         let block: &TensorBlock = system.data(&Self::CACHE_NAME1)
             .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
@@ -375,6 +345,9 @@ impl BATripletNeighborList {
         Ok(res)
     }
 
+    /// for a given system, get a copy of the bond-atom triplets of given set of atomic species.
+    /// optionally include the vectors tied to these triplets
+    /// note: inverting s1 and s2 does not change the result, and the returned triplets may have these species swapped
     pub fn get_per_system_per_species(&self, system: &System, s1:i32,s2:i32,s3:i32, with_vectors: bool) -> Result<Vec<BATripletInfo>, Error>{  
         let block: &TensorBlock = system.data(&Self::CACHE_NAME1)
             .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
@@ -414,6 +387,9 @@ impl BATripletNeighborList {
         Ok(res)
     }
     
+    /// for a given system, get a copy of the bond-atom triplets of given set of atomic species.
+    /// optionally include the vectors tied to these triplets
+    /// note: the triplets may be for (c2,c1) rather than (c1,c2)
     pub fn get_per_system_per_center(&self, system: &System, c1:usize,c2:usize, with_vectors: bool) -> Result<Vec<BATripletInfo>, Error>{  
         {
             let sz = system.size()?;
