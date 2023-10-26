@@ -542,7 +542,10 @@ impl CalculatorBase for SphericalExpansionForBondType {
                             continue;  // sometimes the key for that l,s1,s2,s3 combination was not provided
                         }
                         let mut block = descriptor.block_mut_by_id(ret_blocks[l]);
-                        debug_assert_eq!(block.samples(), s3_samples[*i_s3]);
+                        #[cfg(debug_assertions)]{
+                            let samples_j =s3_samples.get(*i_s3).unwrap();
+                            debug_assert_eq!(&block.samples(), samples_j);
+                        }
                         let n_subset = block.properties();
                         let mut values = array_mut_for_system(block.values_mut());
                         for (i_n,&[n]) in n_subset.iter_fixed_size().enumerate() {

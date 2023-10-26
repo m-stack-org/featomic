@@ -11,6 +11,7 @@ use super::super::super::pre_calculators::BATripletNeighborList;
 /// sample for each pair of atoms (within a spherical cutoff to each other),
 /// optionally filtering on the bond's atom species. The samples names are
 /// (structure", "first_center", "second_center", "bond_i").
+/// (with species(first_center)<=species(second_center))
 ///
 /// Positions gradient samples include all atoms within a spherical cutoff to the bond center,
 /// optionally filtering on the neighbor atom species.
@@ -73,7 +74,6 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
                             if !self.self_contributions && triplet.is_self_contrib {
                                 continue;
                             }
-                            // TODO full/half logic
                             center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_i))
                                 .or_insert_with(BTreeSet::new)
                                 .insert(species[triplet.atom_k]);
@@ -94,7 +94,6 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
                                 if !self.self_contributions && triplet.is_self_contrib {
                                     continue;
                                 }
-                                // TODO full/half logic
                                 center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_i))
                                 .or_insert_with(BTreeSet::new)
                                 .insert(species[triplet.atom_k]);
