@@ -19,8 +19,15 @@ use super::spherical_expansion_pair::GradientsOptions;
 
 use super::super::{split_tensor_map_by_system, array_mut_for_system};
 
-
-/// The actual calculator used to compute SOAP spherical expansion coefficients
+/// The actual calculator used to compute SOAP-like spherical expansion coefficients for bond-centered environments
+/// In other words, the spherical expansion of the neighbor density function centered on the center of a bond,
+/// 'after' rotating the system so that the bond is aligned with the z axis.
+///
+/// This radial+angular decomposition yields coefficients with labels `n` (radial), and `l` and `m` (angular)
+/// as a Calculator, it yields tonsorblocks of with individual values of `l`
+/// and individual species types for center_1, center_2, and neighbor.
+/// Each block has components for each possible value of `m`, and properties for each value of `n`.
+/// a given sample corresponds to a single center bond (a pair of center atoms) within a given structure.
 #[derive(Debug)]
 pub struct SphericalExpansionForBonds {
     /// Underlying calculator, computing spherical expansion on pair at the time

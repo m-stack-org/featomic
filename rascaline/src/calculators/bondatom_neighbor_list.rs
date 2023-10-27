@@ -13,6 +13,10 @@ use crate::pre_calculators::{BATripletInfo,BATripletNeighborList};
 
 
 
+/// for a given vector (`vec`), compute a rotation matrix (`M`) so that `M×vec`
+/// is expressed as `(0,0,+z)`
+/// currently, this matrix corresponds to a rotatoin expressed as `-z;+y;+z` in euler angles,
+/// or as `(x,y,0),theta` in axis-angle representation.
 fn rotate_vector_to_z(vec: Vector3D) -> Matrix3 {
     // re-orientation is done through a rotation matrix, computed through the axis-angle and quaternion representations of the rotation
     // axis/angle representation of the rotation: axis is norm(-y,x,0), angle is arctan2( sqrt(x**2+y**2), z)
@@ -170,11 +174,10 @@ fn rotate_vector_to_z_derivatives(vec: Vector3D) -> (Matrix3,Matrix3,Matrix3) {
 /// the canonical-orientation vector between bond and atom, rather than the bond vector and 'third vector'.
 ///
 /// Users can request either a "full" neighbor list (including an entry for both
-/// `i - j` bonds and `j - i` bonds) or save memory/computational by only
-/// working with "half" neighbor list (only including one entry for each `i - j`
+/// `i-j +k` triplets and `j-i +k` triplets) or save memory/computational by only
+/// working with "half" neighbor list (only including one entry for each `i-j +k`
 /// bond)
-/// if memory is saved, the order of i and j is that the atom with
-/// the smallest Z (or species ID in general) comes first.
+/// When using a half neighbor list, i and j are ordered so the atom with the smallest species comes first.
 ///
 /// The two first atoms must not be the same atom, but the third atom may be one of them,
 /// if the `bond_conbtribution` option is active
