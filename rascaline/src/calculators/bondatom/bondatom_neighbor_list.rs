@@ -5,11 +5,11 @@ use log::warn;
 use metatensor::{TensorMap, TensorBlockRefMut};
 use metatensor::{Labels, LabelsBuilder, LabelValue};
 
-use super::CalculatorBase;
+use crate::calculators::CalculatorBase;
 
 use crate::{Error, System};
 use crate::types::{Vector3D,Matrix3};
-use crate::pre_calculators::{BATripletInfo,BATripletNeighborList};
+use crate::systems::bond_atom_neighbors::{BATripletInfo,BATripletNeighborList};
 
 
 

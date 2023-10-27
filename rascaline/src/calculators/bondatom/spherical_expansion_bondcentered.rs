@@ -12,12 +12,12 @@ use crate::{Error, System};
 use crate::labels::{SamplesBuilder, SpeciesFilter, BondCenteredSamples};
 use crate::labels::{KeysBuilder, TwoCentersSingleNeighborsSpeciesKeys};
 
-use super::super::CalculatorBase;
+use crate::calculators::{CalculatorBase,GradientsOptions};
 
-use super::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
-use super::spherical_expansion_pair::GradientsOptions;
+use super::super::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
 
-use super::super::{split_tensor_map_by_system, array_mut_for_system};
+
+use crate::calculators::{split_tensor_map_by_system, array_mut_for_system};
 
 /// The actual calculator used to compute SOAP-like spherical expansion coefficients for bond-centered environments
 /// In other words, the spherical expansion of the neighbor density function centered on the center of a bond,
@@ -367,7 +367,7 @@ mod tests {
     use crate::calculators::CalculatorBase;
 
     use super::{SphericalExpansionForBonds, SphericalExpansionForBondsParameters};
-    use super::super::{CutoffFunction, RadialScaling};
+    use crate::calculators::soap::{CutoffFunction, RadialScaling};
     use crate::calculators::radial_basis::RadialBasis;
 
 

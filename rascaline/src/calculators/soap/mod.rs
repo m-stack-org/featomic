@@ -12,14 +12,8 @@ pub use self::cutoff::RadialScaling;
 mod spherical_expansion_pair;
 pub use self::spherical_expansion_pair::{SphericalExpansionByPair, SphericalExpansionParameters};
 
-mod spherical_expansion_bondcentered_pair;
-pub use self::spherical_expansion_bondcentered_pair::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
-
 mod spherical_expansion;
 pub use self::spherical_expansion::SphericalExpansion;
-
-mod spherical_expansion_bondcentered;
-pub use self::spherical_expansion_bondcentered::SphericalExpansionForBonds;
 
 mod power_spectrum;
 pub use self::power_spectrum::{SoapPowerSpectrum, PowerSpectrumParameters};

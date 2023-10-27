@@ -12,23 +12,83 @@ use crate::{Error, System, Vector3D};
 
 use crate::math::SphericalHarmonicsCache;
 
-use super::super::CalculatorBase;
-use super::super::bondatom_neighbor_list::BANeighborList;
-use super::super::{split_tensor_map_by_system, array_mut_for_system};
+use crate::calculators::{CalculatorBase,GradientsOptions};
+use super::bondatom_neighbor_list::BANeighborList;
+use crate::calculators::{split_tensor_map_by_system, array_mut_for_system};
 
-use super::{CutoffFunction, RadialScaling};
+use crate::calculators::soap::{CutoffFunction, RadialScaling};
 
 use crate::calculators::radial_basis::RadialBasis;
-use super::SoapRadialIntegralCache;
 
-use super::radial_integral::SoapRadialIntegralParameters;
-
-use super::spherical_expansion_pair::{
+use crate::calculators::soap::{
     SphericalExpansionParameters,
     SphericalExpansionByPair,
-    GradientsOptions,
-    PairContribution
+    SoapRadialIntegralParameters,
+    SoapRadialIntegralCache,
 };
+
+/// Contribution of a single triplet to the spherical expansion
+pub(super) struct TripletContribution {
+    /// Values of the contribution. The shape is (lm, n), where the lm index
+    /// runs over both l and m
+    pub values: ndarray::Array2<f64>,
+    /// Gradients of the contribution w.r.t. the distance between the atoms in
+    /// the pair. The shape is (x/y/z, lm, n).
+    pub gradients: Option<ndarray::Array3<f64>>,
+}
+
+impl TripletContribution {
+    pub fn new(max_radial: usize, max_angular: usize, do_gradients: bool) -> Self {
+        let lm_shape = (max_angular + 1) * (max_angular + 1);
+        Self {
+            values: ndarray::Array2::from_elem((lm_shape, max_radial), 0.0),
+            gradients: if do_gradients {
+                Some(ndarray::Array3::from_elem((3, lm_shape, max_radial), 0.0))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Modify the values/gradients as required to construct the
+    /// values/gradients associated with pair j -> i from pair i -> j.
+    ///
+    /// `m_1_pow_l` should contain the values of `(-1)^l` up to `max_angular`
+    pub fn inverse_pair(&mut self, m_1_pow_l: &[f64]) {
+        let max_angular = m_1_pow_l.len() - 1;
+        let max_radial = self.values.shape()[1];
+        debug_assert_eq!(self.values.shape()[0], (max_angular + 1) * (max_angular + 1));
+
+        // inverting the pair is equivalent to adding a (-1)^l factor to the
+        // pair contribution values, and -(-1)^l to the gradients
+        let mut lm_index = 0;
+        for spherical_harmonics_l in 0..=max_angular {
+            let factor = m_1_pow_l[spherical_harmonics_l];
+            for _m in 0..(2 * spherical_harmonics_l + 1) {
+                for n in 0..max_radial {
+                    self.values[[lm_index, n]] *= factor;
+                }
+                lm_index += 1;
+            }
+        }
+
+        if let Some(ref mut gradients) = self.gradients {
+            for spatial in 0..3 {
+                let mut lm_index = 0;
+                for spherical_harmonics_l in 0..=max_angular {
+                    let factor = -m_1_pow_l[spherical_harmonics_l];
+                    for _m in 0..(2 * spherical_harmonics_l + 1) {
+                        for n in 0..max_radial {
+                            gradients[[spatial, lm_index, n]] *= factor;
+                        }
+                        lm_index += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 /// Parameters for spherical expansion calculator for bond-centered neighbor densities.
 ///
@@ -172,7 +232,7 @@ impl SphericalExpansionForBondType {
     ///
     /// By symmetry, the self-contribution is only non-zero for `L=0`, and does
     /// not contributes to the gradients.
-    pub(super) fn compute_coefficients(&self, contribution: &mut PairContribution, vector: Vector3D, is_self_contribution: bool, gradients: Option<(Vector3D,Vector3D,Vector3D)>){
+    pub(super) fn compute_coefficients(&self, contribution: &mut TripletContribution, vector: Vector3D, is_self_contribution: bool, gradients: Option<(Vector3D,Vector3D,Vector3D)>){
         let mut radial_integral = self.faker.radial_integral.get_or(|| {
             let radial_integral = SoapRadialIntegralCache::new(
                 self.parameters.radial_basis.clone(),
@@ -271,7 +331,7 @@ impl SphericalExpansionForBondType {
         &'a self, system: &'a System,
         s1: i32, s2: i32, s3_list: &'a Vec<i32>,
         do_gradients: GradientsOptions,
-    ) -> Result<impl Iterator<Item = (usize, bool, std::rc::Rc<RefCell<PairContribution>>)> + 'a, Error> {
+    ) -> Result<impl Iterator<Item = (usize, bool, std::rc::Rc<RefCell<TripletContribution>>)> + 'a, Error> {
         
         let max_angular = self.parameters.max_angular;
         let max_radial = self.parameters.max_radial;
@@ -290,7 +350,7 @@ impl SphericalExpansionForBondType {
         }).collect::<Vec<_>>();
         
         let contribution = std::rc::Rc::new(RefCell::new(
-            PairContribution::new(max_radial, max_angular, do_gradients.either())
+            TripletContribution::new(max_radial, max_angular, do_gradients.either())
         ));
 
         let mut mtx_cache = BTreeMap::new();
@@ -572,7 +632,7 @@ mod tests {
     use crate::calculators::{CalculatorBase, SphericalExpansionForBonds};
 
     use super::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
-    use super::super::{CutoffFunction, RadialScaling};
+    use crate::calculators::soap::{CutoffFunction, RadialScaling};
     use crate::calculators::radial_basis::RadialBasis;
 
 
