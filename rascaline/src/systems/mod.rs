@@ -8,7 +8,8 @@ pub use self::cell::{UnitCell, CellShape};
 mod neighbors;
 pub use self::neighbors::NeighborsList;
 
-pub mod bond_atom_neighbors;
+mod bond_atom_neighbors;
+pub use bond_atom_neighbors::{BATripletInfo,BATripletNeighborList};
 
 mod simple_system;
 pub use self::simple_system::SimpleSystem;

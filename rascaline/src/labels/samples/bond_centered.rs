@@ -4,7 +4,7 @@ use metatensor::{Labels, LabelsBuilder};
 
 use crate::{Error, System};
 use super::{SamplesBuilder, SpeciesFilter};
-use crate::systems::bond_atom_neighbors::BATripletNeighborList;
+use crate::systems::BATripletNeighborList;
 
 
 /// `SampleBuilder` for bond-centered representations. This will create one

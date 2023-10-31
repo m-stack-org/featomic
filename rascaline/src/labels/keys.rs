@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use metatensor::{Labels, LabelsBuilder};
 
 use crate::{System, Error};
-use crate::systems::bond_atom_neighbors::BATripletNeighborList;
+use crate::systems::BATripletNeighborList;
 
 /// Common interface to create a set of metatensor's `TensorMap` keys from systems
 pub trait KeysBuilder {

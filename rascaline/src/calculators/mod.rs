@@ -115,5 +115,4 @@ pub mod lode;
 pub use self::lode::{LodeSphericalExpansion, LodeSphericalExpansionParameters};
 
 mod bondatom;
-pub use self::bondatom::bondatom_neighbor_list::BANeighborList;
-pub use self::bondatom::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters, SphericalExpansionForBonds};
+pub use self::bondatom::{SphericalExpansionForBondsParameters, SphericalExpansionForBonds};

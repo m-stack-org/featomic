@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::cell::RefCell;
 
 use ndarray::s;
 use rayon::prelude::*;
@@ -13,11 +14,108 @@ use crate::labels::{SamplesBuilder, SpeciesFilter, BondCenteredSamples};
 use crate::labels::{KeysBuilder, TwoCentersSingleNeighborsSpeciesKeys};
 
 use crate::calculators::{CalculatorBase,GradientsOptions};
-
-use super::super::{SphericalExpansionForBondType, SphericalExpansionForBondsParameters};
-
-
 use crate::calculators::{split_tensor_map_by_system, array_mut_for_system};
+use crate::calculators::soap::{CutoffFunction, RadialScaling};
+use crate::calculators::radial_basis::RadialBasis;
+use crate::calculators::soap::{
+    SoapRadialIntegralParameters,
+    SoapRadialIntegralCache,
+};
+
+use crate::systems::BATripletNeighborList;
+use super::{canonical_vector_for_single_triplet,ExpansionContribution,RawSphericalExpansion,RawSphericalExpansionParameters};
+
+
+/// Parameters for spherical expansion calculator for bond-centered neighbor densities.
+///
+/// (The spherical expansion is at the core of representations in the SOAP
+/// (Smooth Overlap of Atomic Positions) family. See [this review
+/// article](https://doi.org/10.1063/1.5090481) for more information on the SOAP
+/// representation, and [this paper](https://doi.org/10.1063/5.0044689) for
+/// information on how it is implemented in rascaline.)
+///
+/// This calculator is only needed to characterize local environments that are centered
+/// on a pair of atoms rather than a single one.
+#[derive(Debug, Clone)]
+#[derive(serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
+pub struct SphericalExpansionForBondsParameters {
+    /// Spherical cutoffs to use for atomic environments
+    pub(super) cutoffs: [f64;2],
+    /// Number of radial basis function to use in the expansion
+    pub max_radial: usize,
+    /// Number of spherical harmonics to use in the expansion
+    pub max_angular: usize,
+    /// Width of the atom-centered gaussian used to create the atomic density
+    pub atomic_gaussian_width: f64,
+    /// Weight of the central atom contribution to the
+    /// features. If `1` the center atom contribution is weighted the same
+    /// as any other contribution. If `0` the central atom does not
+    /// contribute to the features at all.
+    pub center_atoms_weight: f64,
+    /// Radial basis to use for the radial integral
+    pub radial_basis: RadialBasis,
+    /// Cutoff function used to smooth the behavior around the cutoff radius
+    pub cutoff_function: CutoffFunction,
+    /// radial scaling can be used to reduce the importance of neighbor atoms
+    /// further away from the center, usually improving the performance of the
+    /// model
+    #[serde(default)]
+    pub radial_scaling: RadialScaling,
+}
+
+impl SphericalExpansionForBondsParameters {
+    /// Validate all the parameters
+    pub fn validate(&self) -> Result<(), Error> {
+        self.cutoff_function.validate()?;
+        self.radial_scaling.validate()?;
+
+        // try constructing a radial integral
+        SoapRadialIntegralCache::new(self.radial_basis.clone(), SoapRadialIntegralParameters {
+            max_radial: self.max_radial,
+            max_angular: self.max_angular,
+            atomic_gaussian_width: self.atomic_gaussian_width,
+            cutoff: self.third_cutoff(),
+        })?;
+
+        return Ok(());
+    }
+    pub fn bond_cutoff(&self) -> f64 {
+        self.cutoffs[0]
+    }
+    pub fn third_cutoff(&self) -> f64 {
+        self.cutoffs[1]
+    }
+    
+    fn decompose(self) -> (RawSphericalExpansionParameters,f64,f64){
+        let (bond_cutoff,center_atoms_weight) = (self.bond_cutoff(),self.center_atoms_weight);
+        (
+        RawSphericalExpansionParameters{
+            cutoff: self.third_cutoff(),
+            max_radial: self.max_radial,
+            max_angular: self.max_angular,
+            atomic_gaussian_width: self.atomic_gaussian_width,
+            radial_basis: self.radial_basis,
+            cutoff_function: self.cutoff_function,
+            radial_scaling: self.radial_scaling,
+        },
+        bond_cutoff,
+        center_atoms_weight,
+    )}
+    fn recompose(expansion_params: RawSphericalExpansionParameters, bond_cutoff: f64, center_atoms_weight: f64) -> Self {
+        Self{
+            cutoffs: [bond_cutoff, expansion_params.cutoff],
+            max_radial: expansion_params.max_radial,
+            max_angular: expansion_params.max_angular,
+            atomic_gaussian_width: expansion_params.atomic_gaussian_width,
+            radial_basis: expansion_params.radial_basis,
+            cutoff_function: expansion_params.cutoff_function,
+            radial_scaling: expansion_params.radial_scaling,
+            center_atoms_weight,
+        }
+    }
+    
+}
+
 
 /// The actual calculator used to compute SOAP-like spherical expansion coefficients for bond-centered environments
 /// In other words, the spherical expansion of the neighbor density function centered on the center of a bond,
@@ -28,26 +126,72 @@ use crate::calculators::{split_tensor_map_by_system, array_mut_for_system};
 /// and individual species types for center_1, center_2, and neighbor.
 /// Each block has components for each possible value of `m`, and properties for each value of `n`.
 /// a given sample corresponds to a single center bond (a pair of center atoms) within a given structure.
-#[derive(Debug)]
 pub struct SphericalExpansionForBonds {
-    /// Underlying calculator, computing spherical expansion on pair at the time
-    by_type: SphericalExpansionForBondType,
-    // /// Cache for (-1)^l values
-    //m_1_pow_l: Vec<f64>,
+    /// The object in charge of computing the vectors and distances
+    /// between the bond and the lone atom of the BA triplet (after rotating the system to put the bond in it canonical orientation)
+    distance_calculator: BATripletNeighborList,
+    /// actual spherical expansion object
+    raw_expansion: RawSphericalExpansion,
+    /// a weight multiplier for expansion coefficients from self-contributions
+    center_atoms_weight: f64,
 }
 
 impl SphericalExpansionForBonds {
     /// Create a new `SphericalExpansion` calculator with the given parameters
     pub fn new(parameters: SphericalExpansionForBondsParameters) -> Result<Self, Error> {
-        // let m_1_pow_l = (0..=parameters.max_angular)
-        //     .map(|l| f64::powi(-1.0, l as i32))
-        //     .collect::<Vec<f64>>();
-
+        parameters.validate()?;
+        let cutoffs = parameters.cutoffs.clone();
+        let (exp_params, _bond_cut, center_weight) = parameters.decompose();
+        
         return Ok(Self {
-            by_type: SphericalExpansionForBondType::new(parameters)?,
-            //m_1_pow_l,
+            center_atoms_weight: center_weight,
+            raw_expansion: RawSphericalExpansion::new(exp_params),
+            distance_calculator: BATripletNeighborList{
+                cutoffs,
+            },
         });
     }
+
+
+    /// a smart-ish way to obtain the coefficients of all bond expansions:
+    /// this function's API is designed to be resource-efficient for both SphericalExpansionForBondType and
+    /// SphericalExpansionForBonds, while being computationally efficient for the underlying BANeighborList calculator.
+    pub(super) fn get_coefficients_for<'a>(
+        &'a self, system: &'a System,
+        s1: i32, s2: i32, s3_list: &'a Vec<i32>,
+        do_gradients: GradientsOptions,
+    ) -> Result<impl Iterator<Item = (usize, bool, std::rc::Rc<RefCell<ExpansionContribution>>)> + 'a, Error> {
+        
+        let species = system.species().unwrap();
+        
+        
+        let pre_iter = s3_list.iter().flat_map(|s3|{
+            self.distance_calculator.get_per_system_per_species(system,s1,s2,*s3,true).unwrap().into_iter()
+        }).flat_map(|triplet| {
+            let invert: &'static [bool] = {
+                if s1==s2 {&[false,true]}
+                else if species[triplet.atom_i] == s1 {&[false]}
+                else {&[true]}
+            };
+            invert.iter().map(move |invert|(triplet,*invert))
+        }).collect::<Vec<_>>();
+        
+        let contribution = std::rc::Rc::new(RefCell::new(
+            self.raw_expansion.make_contribution_buffer(do_gradients.either())
+        ));
+
+        let mut mtx_cache = BTreeMap::new();
+        let mut dmtx_cache = BTreeMap::new();
+        
+        return Ok(pre_iter.into_iter().map(move |(triplet,invert)| {
+            let vector = canonical_vector_for_single_triplet(&triplet, invert, false, &mut mtx_cache, &mut dmtx_cache).unwrap();
+            let weight = if triplet.is_self_contrib {self.center_atoms_weight} else {1.0};
+            self.raw_expansion.compute_coefficients(&mut *contribution.borrow_mut(), vector.vect,weight,None);
+            (triplet.triplet_i, invert, contribution.clone())
+        }));
+
+    }
+    
 }   
 
 impl CalculatorBase for SphericalExpansionForBonds {
@@ -56,24 +200,29 @@ impl CalculatorBase for SphericalExpansionForBonds {
     }
     
     fn cutoffs(&self) -> &[f64] {
-        &self.by_type.parameters.cutoffs
+        &self.distance_calculator.cutoffs
     }
 
     fn parameters(&self) -> String {
-        serde_json::to_string(self.by_type.parameters()).expect("failed to serialize to JSON")
+        let params = SphericalExpansionForBondsParameters::recompose(
+            (*self.raw_expansion.parameters()).clone(),
+            self.distance_calculator.bond_cutoff(),
+            self.center_atoms_weight,
+        );
+        serde_json::to_string(&params).expect("failed to serialize to JSON")
     }
 
     fn keys(&self, systems: &mut [System]) -> Result<Labels, Error> {
         let builder = TwoCentersSingleNeighborsSpeciesKeys {
-            cutoffs: self.by_type.parameters.cutoffs,
+            cutoffs: self.distance_calculator.cutoffs,
             self_contributions: true,
-            raw_triplets: &self.by_type.distance_calculator.raw_triplets,
+            raw_triplets: &self.distance_calculator,
         };
         let keys = builder.keys(systems)?;
 
         let mut builder = LabelsBuilder::new(vec!["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
         for &[species_center_1, species_center_2, species_neighbor] in keys.iter_fixed_size() {
-            for spherical_harmonics_l in 0..=self.by_type.parameters().max_angular {
+            for spherical_harmonics_l in 0..=self.raw_expansion.parameters().max_angular {
                 builder.add(&[spherical_harmonics_l.into(), species_center_1, species_center_2, species_neighbor]);
             }
         }
@@ -97,12 +246,12 @@ impl CalculatorBase for SphericalExpansionForBonds {
             }
 
             let builder = BondCenteredSamples {
-                cutoffs: self.by_type.parameters().cutoffs,
+                cutoffs: self.distance_calculator.cutoffs,
                 species_center_1: SpeciesFilter::Single(species_center_1.i32()),
                 species_center_2: SpeciesFilter::Single(species_center_2.i32()),
                 species_neighbor: SpeciesFilter::Single(species_neighbor.i32()),
                 self_contributions: true,
-                raw_triplets: &self.by_type.distance_calculator.raw_triplets,
+                raw_triplets: &self.distance_calculator,
             };
 
             samples_per_species.insert((species_center_1, species_center_2, species_neighbor), builder.samples(systems)?);
@@ -121,7 +270,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
     }
 
     fn supports_gradient(&self, parameter: &str) -> bool {
-        self.by_type.supports_gradient(parameter)
+        false // for now, discontinuities are a pain
     }
 
     fn positions_gradient_samples(&self, keys: &Labels, samples: &[Labels], systems: &mut [System]) -> Result<Vec<Labels>, Error> {
@@ -133,12 +282,12 @@ impl CalculatorBase for SphericalExpansionForBonds {
             // TODO: we don't need to rebuild the gradient samples for different
             // spherical_harmonics_l
             let builder = BondCenteredSamples {
-                cutoffs: self.by_type.parameters().cutoffs,
+                cutoffs: self.distance_calculator.cutoffs,
                 species_center_1: SpeciesFilter::Single(species_center_1.i32()),
                 species_center_2: SpeciesFilter::Single(species_center_2.i32()),
                 species_neighbor: SpeciesFilter::Single(species_neighbor.i32()),
                 self_contributions: true,
-                raw_triplets: &self.by_type.distance_calculator.raw_triplets,
+                raw_triplets: &self.distance_calculator,
             };
 
             gradient_samples.push(builder.gradients_for(systems, samples)?);
@@ -181,7 +330,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
 
     fn properties(&self, keys: &Labels) -> Vec<Labels> {
         let mut properties = LabelsBuilder::new(self.property_names());
-        for n in 0..self.by_type.parameters().max_radial {
+        for n in 0..self.raw_expansion.parameters().max_radial {
             properties.add(&[n]);
         }
         let properties = properties.finish();
@@ -196,7 +345,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
             return Ok(());
         }
         
-        let max_angular = self.by_type.parameters().max_angular;
+        let max_angular = self.raw_expansion.parameters().max_angular;
         let l_slices: Vec<_> = (0..=max_angular).map(|l|{
             let lsize = l*l;
             let msize = 2*l+1;
@@ -208,10 +357,10 @@ impl CalculatorBase for SphericalExpansionForBonds {
             cell: descriptor.block_by_id(0).gradient("cell").is_some(),
         };
         if do_gradients.positions {
-            assert!(self.by_type.supports_gradient("positions"));
+            assert!(self.supports_gradient("positions"));
         }
         if do_gradients.cell {
-            assert!(self.by_type.supports_gradient("cell"));
+            assert!(self.supports_gradient("cell"));
         }
         
         let radial_selection = descriptor.blocks().iter().map(|b|{
@@ -260,9 +409,9 @@ impl CalculatorBase for SphericalExpansionForBonds {
             .zip_eq(&mut descriptors_by_system)
             .try_for_each(|(system, descriptor)|
         {
-            //system.compute_triplet_neighbors(self.by_type.parameters().bond_cutoff(), self.by_type.parameters().third_cutoff())?;
-            self.by_type.distance_calculator.raw_triplets.ensure_computed_for_system(system)?;
-            let triplets = self.by_type.distance_calculator.raw_triplets.get_for_system(system, false)?;
+            //system.compute_triplet_neighbors(self.parameters.bond_cutoff(), self.parameters.third_cutoff())?;
+            self.distance_calculator.ensure_computed_for_system(system)?;
+            let triplets = self.distance_calculator.get_for_system(system, false)?;
             let species = system.species()?;
             
             for ((s1,s2),s1s2_blocks) in s1s2_to_block_ids.iter() {    
@@ -303,7 +452,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
                     }
                     s3_samples.push(samples);
                 }
-                for (triplet_i,inverted,contribution) in self.by_type.get_coefficients_for(system, *s1, *s2, &s3_list, do_gradients)? {
+                for (triplet_i,inverted,contribution) in self.get_coefficients_for(system, *s1, *s2, &s3_list, do_gradients)? {
                     let triplet = &triplets[triplet_i];
                     
                     #[cfg(debug_assertions)]{
@@ -362,7 +511,7 @@ mod tests {
     use ndarray::ArrayD;
     use metatensor::{Labels, TensorBlock, EmptyArray, LabelsBuilder, TensorMap};
 
-    use crate::systems::test_utils::{test_systems};
+    use crate::systems::test_utils::test_systems;
     use crate::{Calculator, CalculationOptions, LabelsSelection};
     use crate::calculators::CalculatorBase;
 
