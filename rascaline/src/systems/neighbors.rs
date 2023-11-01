@@ -167,7 +167,7 @@ impl CellList {
     /// ASSUMPTION: The atom is *uniquely* identified by its `index`.
     pub fn add_atom(&mut self, index: usize, position: Vector3D) {
         let fractional = if self.unit_cell.is_infinite() {
-            position  // TODO: this feels like it would cause bugs if we have more than one subcell (for example for a cutoff <0.5)
+            position
         } else {
             self.unit_cell.fractional(position)
         };
@@ -175,7 +175,8 @@ impl CellList {
         let n_cells = self.cells.shape();
         let n_cells = [n_cells[0], n_cells[1], n_cells[2]];
 
-        // find the cell in which this atom should go
+        // find the subcell in which this atom 'should go'
+        // (discounting pbc for periodic systems, and the possibility of being out of range for infinite systems)
         let cell_index = [
             f64::floor(fractional[0] * n_cells[0] as f64) as i32,
             f64::floor(fractional[1] * n_cells[1] as f64) as i32,
@@ -251,10 +252,21 @@ impl CellList {
                                 let shift = CellShift(cell_shift) + atom_i.shift - atom_j.shift;
                                 let shift_is_zero = shift[0] == 0 && shift[1] == 0 && shift[2] == 0;
 
-                                if atom_i.index == atom_j.index && shift_is_zero {
-                                    // only create pair with the same atom twice
-                                    // if the pair spans more than one unit cell
-                                    continue;
+                                if atom_i.index == atom_j.index {
+                                    if shift_is_zero {
+                                        // only create pair with the same atom twice
+                                        // if the pair spans more than one unit cell
+                                        continue;
+                                    // allowing every value for the shift double-counts the image-based pairs
+                                    // we get both a[0,0,0]-a[i,j,k] and a[0,0,0]-a[-i,-j,-k] == a[i,j,k]-a[0,0,0]
+                                    // the following blocks get rid of one of them
+                                    } else if shift[0] + shift[1] + shift[2] < 0 {
+                                        continue;
+                                    } else if shift[0] + shift[1] + shift[2] == 0 &&
+                                        (shift[2] < 0 || (shift[2] == 0 && shift[1] < 0))
+                                    {
+                                        continue;
+                                    }
                                 }
 
                                 if self.unit_cell.is_infinite() && !shift_is_zero {
@@ -430,21 +442,21 @@ mod tests {
         let neighbors = NeighborsList::new(&positions, cell, 3.0);
 
         let expected = [
-            (Vector3D::new(0.0, -1.0, -1.0), [-1, 0, 0]),
+            //(Vector3D::new(0.0, -1.0, -1.0), [-1, 0, 0]),
             (Vector3D::new(1.0, 0.0, -1.0),  [-1, 0, 1]),
             (Vector3D::new(1.0, -1.0, 0.0),  [-1, 1, 0]),
-            (Vector3D::new(-1.0, 0.0, -1.0), [0, -1, 0]),
+            //(Vector3D::new(-1.0, 0.0, -1.0), [0, -1, 0]),
             (Vector3D::new(0.0, 1.0, -1.0),  [0, -1, 1]),
-            (Vector3D::new(-1.0, -1.0, 0.0), [0, 0, -1]),
+            //(Vector3D::new(-1.0, -1.0, 0.0), [0, 0, -1]),
             (Vector3D::new(1.0, 1.0, 0.0),   [0, 0, 1]),
-            (Vector3D::new(0.0, -1.0, 1.0),  [0, 1, -1]),
+            //(Vector3D::new(0.0, -1.0, 1.0),  [0, 1, -1]),
             (Vector3D::new(1.0, 0.0, 1.0),   [0, 1, 0]),
-            (Vector3D::new(-1.0, 1.0, 0.0),  [1, -1, 0]),
-            (Vector3D::new(-1.0, 0.0, 1.0),  [1, 0, -1]),
+            //(Vector3D::new(-1.0, 1.0, 0.0),  [1, -1, 0]),
+            //(Vector3D::new(-1.0, 0.0, 1.0),  [1, 0, -1]),
             (Vector3D::new(0.0, 1.0, 1.0),   [1, 0, 0]),
         ];
 
-        assert_eq!(neighbors.pairs.len(), 12);
+        assert_eq!(neighbors.pairs.len(), 6);
         for (pair, (vector, shifts)) in neighbors.pairs.iter().zip(&expected) {
             assert_eq!(pair.first, 0);
             assert_eq!(pair.second, 0);
@@ -482,6 +494,31 @@ mod tests {
             assert_eq!(pair.second, expected.1);
             assert_eq!(pair.cell_shift_indices, [0, 0, 0]);
             assert_ulps_eq!(pair.distance, 2.0);
+        }
+    }
+    
+    #[test]
+    fn small_cell_large_cutoffs() {
+        let cell = UnitCell::cubic(0.5);
+        let positions = [Vector3D::new(0.0, 0.0, 0.0)];
+        let neighbors = NeighborsList::new(&positions, cell, 0.6);
+
+        let expected = [
+            // (Vector3D::new(-0.5, 0.0, 0.0),  [-1, 0, 0]),
+            // (Vector3D::new(0.0, -0.5, 0.0),  [0, -1, 0]),
+            // (Vector3D::new(0.0, 0.0, -0.5), [0, 0, -1]),
+            (Vector3D::new(0.0, 0.0, 0.5), [0, 0, 1]),
+            (Vector3D::new(0.0, 0.5, 0.0),  [0, 1, 0]),
+            (Vector3D::new(0.5, 0.0, 0.0),  [1, 0, 0]),
+        ];
+        
+        assert_eq!(neighbors.pairs.len(), 3);
+        for (pair, (vector, shifts)) in neighbors.pairs.iter().zip(&expected) {
+            assert_eq!(pair.first, 0);
+            assert_eq!(pair.second, 0);
+            assert_ulps_eq!(pair.distance, 0.5);
+            assert_ulps_eq!(pair.vector, vector);
+            assert_eq!(&pair.cell_shift_indices, shifts);
         }
     }
 }
