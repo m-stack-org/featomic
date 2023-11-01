@@ -166,14 +166,14 @@ impl SphericalExpansionForBonds {
         
         
         let pre_iter = s3_list.iter().flat_map(|s3|{
-            self.distance_calculator.get_per_system_per_species(system,s1,s2,*s3,true).unwrap().into_iter()
-        }).flat_map(|triplet| {
+            self.distance_calculator.get_per_system_per_species_enumerated(system,s1,s2,*s3).unwrap().into_iter()
+        }).flat_map(|(triplet_i,triplet)| {
             let invert: &'static [bool] = {
                 if s1==s2 {&[false,true]}
                 else if species[triplet.atom_i] == s1 {&[false]}
                 else {&[true]}
             };
-            invert.iter().map(move |invert|(triplet,*invert))
+            invert.iter().map(move |invert|(triplet_i,triplet,*invert))
         }).collect::<Vec<_>>();
         
         let contribution = std::rc::Rc::new(RefCell::new(
@@ -183,11 +183,11 @@ impl SphericalExpansionForBonds {
         let mut mtx_cache = BTreeMap::new();
         let mut dmtx_cache = BTreeMap::new();
         
-        return Ok(pre_iter.into_iter().map(move |(triplet,invert)| {
+        return Ok(pre_iter.into_iter().map(move |(triplet_i,triplet,invert)| {
             let vector = canonical_vector_for_single_triplet(&triplet, invert, false, &mut mtx_cache, &mut dmtx_cache).unwrap();
             let weight = if triplet.is_self_contrib {self.center_atoms_weight} else {1.0};
             self.raw_expansion.compute_coefficients(&mut *contribution.borrow_mut(), vector.vect,weight,None);
-            (triplet.triplet_i, invert, contribution.clone())
+            (triplet_i, invert, contribution.clone())
         }));
 
     }
@@ -400,7 +400,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
         
         #[cfg(debug_assertions)]{
             for block in descriptor.blocks() {
-                assert_eq!(block.samples().names(), ["structure", "first_center", "second_center", "bond_i"]);
+                assert_eq!(block.samples().names(), ["structure", "first_center", "second_center", "cell_shift_a", "cell_shift_b", "cell_shift_c"]);
             }
         }
         let mut descriptors_by_system = split_tensor_map_by_system(descriptor, systems.len());
@@ -411,7 +411,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
         {
             //system.compute_triplet_neighbors(self.parameters.bond_cutoff(), self.parameters.third_cutoff())?;
             self.distance_calculator.ensure_computed_for_system(system)?;
-            let triplets = self.distance_calculator.get_for_system(system, false)?;
+            let triplets = self.distance_calculator.get_for_system(system)?;
             let species = system.species()?;
             
             for ((s1,s2),s1s2_blocks) in s1s2_to_block_ids.iter() {    
@@ -434,14 +434,16 @@ impl CalculatorBase for SphericalExpansionForBonds {
                 }
                 // {bond_i->(i_s3,sample_i)}
                 let mut s3_samples = vec![];
-                let mut sample_lut: BTreeMap<usize,Vec<(usize,usize)>> = BTreeMap::new();
+                let mut sample_lut: BTreeMap<(usize,usize,[i32;3]),Vec<(usize,usize)>> = BTreeMap::new();
                 
                 // also assume that the systems are in order in the samples
                 for (i_s3, s3blocks) in per_s3_blocks.into_iter().enumerate() {
                     let first_good_block = s3blocks.iter().filter(|b_i|**b_i!=usize::MAX).next().unwrap();
                     let samples = descriptor.block_by_id(*first_good_block).samples();
-                    for (sample_i, &[_system_i,_atom_1,_atom_2,bond_i]) in samples.iter_fixed_size().enumerate(){
-                        match sample_lut.entry(bond_i.usize()) {
+                    for (sample_i, &[_system_i,atom_i,atom_j,cell_shift_a, cell_shift_b, cell_shift_c]) in samples.iter_fixed_size().enumerate(){
+                        match sample_lut.entry(
+                            (atom_i.usize(),atom_j.usize(),[cell_shift_a.i32(),cell_shift_b.i32(),cell_shift_c.i32()])
+                        ) {
                             Entry::Vacant(e) => {
                                 e.insert(vec![(i_s3,sample_i)]);
                             },
@@ -457,12 +459,14 @@ impl CalculatorBase for SphericalExpansionForBonds {
                     
                     #[cfg(debug_assertions)]{
                         if triplet.atom_i == triplet.atom_j{
-                            unimplemented!("cannot deal with bonds formed of self-images quite yet.")
+                            unimplemented!("cannot deal with bonds formed of self-images quite yet.")  // TODO
                         }
                     }
                     
                     let contribution = contribution.borrow();
-                    let these_samples = match sample_lut.get(&triplet.bond_i){
+                    let these_samples = match sample_lut.get(
+                        &(triplet.atom_i,triplet.atom_j,triplet.bond_cell_shift)
+                    ){
                         None => {continue;},
                         Some(a) => a,
                     };
@@ -583,10 +587,10 @@ mod tests {
             [2],
         ]);
 
-        let samples = Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
-            [0, 0, 2, 1],
-            [0, 0, 1, 0],
-            //[0, 1, 2, 2],  // excluding this one
+        let samples = Labels::new(["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"], &[
+            [0, 0, 2, 0,0,0],
+            [0, 0, 1, 0,0,0],
+            //[0, 1, 2, 0,0,0],  // excluding this one
         ]);
 
         let keys = Labels::new(["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"], &[
@@ -628,10 +632,10 @@ mod tests {
         // species_center key.
         let block = TensorBlock::new(
             EmptyArray::new(vec![3, 1]),
-            &Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
-                [0, 0, 2, 1],
-                [0, 1, 2, 2],
-                [0, 0, 1, 0],
+            &Labels::new(["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"], &[
+                [0, 0, 2, 0,0,0],
+                [0, 1, 2, 0,0,0],
+                [0, 0, 1, 0,0,0],
             ]),
             &[],
             &Labels::single(),
@@ -667,10 +671,10 @@ mod tests {
         // entries centered on H atoms should be zero
         assert_eq!(
             *block.samples,
-            Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
-                [0, 0, 2, 1],
-                [0, 1, 2, 2],  // the sample that doesn't exist
-                [0, 0, 1, 0],
+            Labels::new(["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"], &[
+                [0, 0, 2, 0,0,0],
+                [0, 1, 2, 0,0,0],  // the sample that doesn't exist
+                [0, 0, 1, 0,0,0],
             ])
         );
         let array = block.values.as_array();
@@ -686,10 +690,10 @@ mod tests {
         // entries centered on O atoms should be zero
         assert_eq!(
             *block.samples,
-            Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
-                [0, 0, 2, 1],
-                [0, 1, 2, 2],
-                [0, 0, 1, 0],
+            Labels::new(["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"], &[
+                [0, 0, 2, 0,0,0],
+                [0, 1, 2, 0,0,0],
+                [0, 0, 1, 0,0,0],
             ])
         );
         let array = block.values.as_array();

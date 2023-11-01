@@ -365,7 +365,7 @@ impl NeighborsList {
         pairs.sort_unstable_by_key(|pair| (pair.first, pair.second));
 
         let mut pairs_by_center = vec![Vec::new(); positions.len()];
-        for (pair_i,pair) in pairs.iter().enumerate() {
+        for pair in pairs.iter() {
             pairs_by_center[pair.first].push(pair.clone());
             pairs_by_center[pair.second].push(pair.clone());
         }

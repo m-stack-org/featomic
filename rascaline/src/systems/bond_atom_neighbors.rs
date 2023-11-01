@@ -1,10 +1,5 @@
 use std::cmp::PartialEq;
 use std::collections::BTreeMap;
-use std::mem::MaybeUninit;
-use ndarray::{Array3,s};
-
-use metatensor::TensorBlock;
-use metatensor::{Labels, LabelsBuilder};
 
 use crate::systems::Pair;
 use crate::{Error, System, SystemBase};
@@ -32,18 +27,18 @@ pub struct BATripletInfo{
     pub atom_j: usize,
     /// number of the third atom (the neighbor atom) within the system
     pub atom_k: usize,
-    /// number that uniquely identifies the bond within the system, in case of periodic boundary condition shenanigans
-    /// it is independent of the order of the atoms within the bond
-    pub bond_i: usize,
-    /// number that uniquely identifies the bond-atom triplet within the system, in case of periodic boundary condition shenanigans
-    /// it is independent of the order of the atoms within the triplet's bond
-    pub triplet_i: usize,
+    /// how many cell boundaries are crossed by the vector between the triplet's first
+    /// and second atoms
+    pub bond_cell_shift: [i32;3],
+    /// how many cell boundaries are crossed by the vector between the triplet's first
+    /// and third atoms
+    pub third_cell_shift: [i32;3],
     /// wether or not the third atom is the same as one of the first two (and NOT a periodic image thereof)
     pub is_self_contrib: bool,
     /// optional: the vector between first and second atom
-    pub bond_vector: Option<Vector3D>,
+    pub bond_vector: Vector3D,
     /// optional: the bector between the bond center and the third atom
-    pub third_vector: Option<Vector3D>,
+    pub third_vector: Vector3D,
 }
 
 
@@ -96,56 +91,41 @@ fn list_raw_triplets(system: &mut dyn SystemBase, bond_cutoff: f64, third_cutoff
     };
     
     let mut ba_triplets = vec![];
-    let mut triplet_i = 0;
-    for (bond_i,bond) in bonds.into_iter().map(reorient_pair).enumerate() {
+    for bond in bonds.into_iter().map(reorient_pair) {
         let halfbond = 0.5 * bond.vector;
 
         // first, record the self contribution
         {
             let ((pairatom_i,pairatom_j),inverted) = sort_pair((bond.first,bond.second));
-            let halfbond = if inverted {
-                -halfbond
+            let (halfbond, to_i, to_j) = if inverted {
+                (-halfbond, bond.cell_shift_indices, [0;3])
             } else {
-                halfbond
+                (halfbond, [0;3], bond.cell_shift_indices)
             };
 
             let mut tri = BATripletInfo{
                 atom_i: bond.first, atom_j: bond.second, atom_k: pairatom_i,
-                bond_i, triplet_i,
-                bond_vector: Some(bond.vector),
-                third_vector: Some(-halfbond),
+                bond_cell_shift: bond.cell_shift_indices,
+                third_cell_shift: to_i,
+                bond_vector: bond.vector,
+                third_vector: -halfbond,
                 is_self_contrib: true,
             };
-            // if half_enumeration {
             ba_triplets.push(tri.clone());
             tri.atom_k = pairatom_j;
-            tri.third_vector = Some(halfbond);
-            tri.triplet_i += 1;
+            tri.third_vector = halfbond;
+            tri.third_cell_shift = to_j;
             ba_triplets.push(tri);
-            // } else {
-            //     ba_triplets.push(tri.clone());
-            //     tri.bond_vector = Some(-bond.vector);
-            //     (tri.atom_i,tri.atom_j) = (tri.atom_j,tri.atom_i);
-            //     ba_triplets.push(tri.clone());
-            //     tri.atom_k = tri.atom_i;
-            //     tri.third_vector = Some(halfbond);
-            //     tri.triplet_i += 1;
-            //     ba_triplets.push(tri.clone());
-            //     tri.bond_vector = Some(bond.vector);
-            //     (tri.atom_i,tri.atom_j) = (tri.atom_j,tri.atom_i);
-            //     ba_triplets.push(tri);
-            // }
-            triplet_i += 2;
         }
         
         
         // note: pairs_containing does "full enumeration", but the underlying pair objects only form half enumeration.
         for one_three in system.pairs_containing(bond.first)?.iter().map(|p|reorient_pair(p.clone())) {
-            let (third,third_vector) = if one_three.first == bond.first {
-                (one_three.second, one_three.vector - halfbond)
+            let (third,third_vector, to_k) = if one_three.first == bond.first {
+                (one_three.second, one_three.vector - halfbond, one_three.cell_shift_indices)
             } else {
                 debug_assert_eq!(one_three.second, bond.first);
-                (one_three.first, -one_three.vector - halfbond)
+                (one_three.first, -one_three.vector - halfbond, one_three.cell_shift_indices.map(|f|-f))
             };
             
             if third_vector.norm2() < third_cutoff*third_cutoff {
@@ -167,20 +147,13 @@ fn list_raw_triplets(system: &mut dyn SystemBase, bond_cutoff: f64, third_cutoff
                 
                 let tri = BATripletInfo{
                     atom_i: bond.first, atom_j: bond.second, atom_k: third,
-                    bond_i, triplet_i,
-                    bond_vector: Some(bond.vector),
-                    third_vector: Some(third_vector),
+                    bond_cell_shift: bond.cell_shift_indices,
+                    third_cell_shift: to_k,
+                    bond_vector: bond.vector,
+                    third_vector,
                     is_self_contrib: false,
                 };
-                triplet_i += 1;
-                // if half_enumeration {
                 ba_triplets.push(tri);
-                // } else {
-                //     ba_triplets.push(tri.clone());
-                //     tri.bond_vector = Some(-bond.vector);
-                //     (tri.atom_i,tri.atom_j) = (tri.atom_j,tri.atom_i);
-                //     ba_triplets.push(tri);
-                // }
             }
         }
     }
@@ -214,52 +187,8 @@ impl BATripletNeighborList {
     
     /// internal function that deletages computing the triplets, but deals with storing them for a given system.
     fn do_compute_for_system(&self, system: &mut System) -> Result<(), Error> {
-        // let triplets_raw = TripletNeighborsList::for_system(&**system, self.bond_cutoff(), self.third_cutoff())?;
-        // let triplets = triplets_raw.triplets();
         let triplets = list_raw_triplets(&mut **system, self.cutoffs[0], self.cutoffs[1])?;
 
-        let components = [Labels::new(
-            ["vector_pair_component"],
-            &[[0x00_i32],[0x01],[0x02], [0x10],[0x11],[0x12]],
-        )];
-        let properties = Labels::new(["dummy"],&[[0]]);
-        
-        let mut data = Array3::uninit([triplets.len(),6,1]);
-        let mut samples = LabelsBuilder::new(
-            vec!["bond_atom_1","bond_atom_2","atom_3","bond_i","triplet_i","is_self_contribution"]
-        );
-        samples.reserve(triplets.len());
-        
-        for (triplet_i,triplet) in triplets.iter().enumerate() {
-            samples.add(&[
-                triplet.atom_i, triplet.atom_j, triplet.atom_k,
-                triplet.bond_i, triplet_i, triplet.is_self_contrib as usize,
-            ]);
-            let mut dataslice = data.slice_mut(s![triplet_i,..,0]);
-            // safety: the function called to get the triplets does indeed populate the vectors
-            let bv = triplet.bond_vector.as_ref().unwrap();
-            let tv = triplet.third_vector.as_ref().unwrap();
-            dataslice[0_usize] = MaybeUninit::new(bv[0]);
-            dataslice[1_usize] = MaybeUninit::new(bv[1]);
-            dataslice[2_usize] = MaybeUninit::new(bv[2]);
-            dataslice[3_usize] = MaybeUninit::new(tv[0]);
-            dataslice[4_usize] = MaybeUninit::new(tv[1]);
-            dataslice[5_usize] = MaybeUninit::new( tv[2]);
-        }
-        
-        // SAFETY: we just spent an entire loop filling this array
-        let data: Array3<f64> = unsafe{data.assume_init()};
-        //first,second,third,bond_i,is_self_contribution, bond_vec, third_vec
-        let block /*:Self::CACHE_TYPE1*/ = TensorBlock::new(
-            data.into_dyn(),
-            &samples.finish(),
-            &components,
-            &properties,
-        )?;
-        system.store_data(Self::CACHE_NAME1.into(),block);
-        //let block: &TensorBlock = system.data(&Self::CACHE_NAME1).expect("unreachable: store_data failed".into())
-        //    .downcast_ref().expect("unreachable: store_data didn't store the right type".into());
-            
         let species = system.species()?;  // calling this again so the previous borrow expires
         let mut triplets_by_species = BTreeMap::new();
         let mut triplets_by_center = {
@@ -294,6 +223,7 @@ impl BATripletNeighborList {
         system.store_data(Self::CACHE_NAME2.into(),triplets_by_species);
         system.store_data(Self::CACHE_NAME3.into(),triplets_by_center);
         system.store_data(Self::CACHE_NAME_ATTR.into(),self.cutoffs);
+        system.store_data(Self::CACHE_NAME1.into(),triplets);
         Ok(())
     }
     
@@ -317,121 +247,102 @@ impl BATripletNeighborList {
         return self.do_compute_for_system(system);
     }
     
-    /// for a given system, get a copy of all the bond-atom triplets.
-    /// optionally include the vectors tied to these triplets
-    pub fn get_for_system(&self, system: &System, with_vectors: bool) -> Result<Vec<BATripletInfo>, Error>{  
-        let block: &TensorBlock = system.data(&Self::CACHE_NAME1)
+    /// for a given system, get a reference to all the bond-atom triplets, vectors included
+    pub fn get_for_system<'a>(&self, system: &'a System) -> Result<&'a [BATripletInfo], Error>{  
+        let triplets: &Vec<BATripletInfo> = system.data(&Self::CACHE_NAME1)
             .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
             .downcast_ref().ok_or_else(||{Error::Internal("Failed to downcast cache".into())})?;
-        
-        let res:Vec<_> = block.samples().iter_fixed_size().map(
-            |[atom_i,atom_j,atom_k,bond_i,triplet_i,is_self_contrib]| {
-                let (bond_vector,third_vector) = if with_vectors {
-                    let values = block.values();
-                    let vecslice = values.as_array().slice(s![triplet_i.usize(),..,0_usize]);
-                    let v = vecslice.to_slice().ok_or_else(||Error::Internal("triplet cache does not have vectors be contiguous".into())).unwrap();
-                    (Some(Vector3D::new(v[0],v[1],v[2])), Some(Vector3D::new(v[3],v[4],v[5])))
-                } else {
-                    (None,None)
-                };
-            BATripletInfo{
-                atom_i: atom_i.usize(), atom_j: atom_j.usize(), atom_k: atom_k.usize(),
-                bond_i: bond_i.usize(), triplet_i: triplet_i.usize(),
-                is_self_contrib: (is_self_contrib.i32()!=0),
-                bond_vector, third_vector,
-            }
-        }).collect();
-        
-        Ok(res)
+        Ok(triplets)
     }
 
-    /// for a given system, get a copy of the bond-atom triplets of given set of atomic species.
-    /// optionally include the vectors tied to these triplets
-    /// note: inverting s1 and s2 does not change the result, and the returned triplets may have these species swapped
-    pub fn get_per_system_per_species(&self, system: &System, s1:i32,s2:i32,s3:i32, with_vectors: bool) -> Result<Vec<BATripletInfo>, Error>{  
-        let block: &TensorBlock = system.data(&Self::CACHE_NAME1)
-            .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
-            .downcast_ref().ok_or_else(||{Error::Internal("Failed to downcast cache".into())})?;
-        let species_lut: &BTreeMap<(i32,i32,i32),Vec<usize>> = system.data(&Self::CACHE_NAME2)
+    
+    fn get_species_lut<'a>(&self, system: &'a System, s1:i32, s2:i32, s3:i32) -> Result<&'a [usize],Error> {
+        let full_lut: &BTreeMap<(i32,i32,i32),Vec<usize>> = system.data(&Self::CACHE_NAME2)
             .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
             .downcast_ref().ok_or_else(||{Error::Internal("Failed to downcast cache".into())})?;
 
         let ((s1,s2),_) = sort_pair((s1,s2));
-        let species_lut = match species_lut.get(&(s1,s2,s3)) {
-            None => {return Ok(vec![])},
-            Some(lut) => lut,
-        };
-        
-        let res:Vec<_> = species_lut.iter().map(|triplet_i|{
-            //|[atom_i,atom_j,atom_k,bond_i,triplet_i,is_self_contrib]| {
-            let samps = block.samples();
-            let (atom_i,atom_j,atom_k,bond_i,triplet_i,is_self_contrib) = if let &[a,b,c,d,e,f] = &samps[*triplet_i] {
-                (a,b,c,d,e,f)
-            } else {
-                unreachable!();  // error: wrong length for sample description
-            };
-            let (bond_vector,third_vector) = if with_vectors {
-                let values = block.values();
-                let vecslice = values.as_array().slice(s![triplet_i.usize(),..,0_usize]);                    let v = vecslice.to_slice().ok_or_else(||Error::Internal("triplet cache does not have vectors be contiguous".into())).unwrap();                    (Some(Vector3D::new(v[0],v[1],v[2])), Some(Vector3D::new(v[3],v[4],v[5])))
-            } else {
-                (None,None)
-            };
-            BATripletInfo{
-                atom_i: atom_i.usize(), atom_j: atom_j.usize(), atom_k: atom_k.usize(),
-                bond_i: bond_i.usize(), triplet_i: triplet_i.usize(),
-                is_self_contrib: (is_self_contrib.i32()!=0),
-                bond_vector, third_vector,
-            }
-        }).collect();
-            
-        Ok(res)
+        Ok(match full_lut.get(&(s1,s2,s3)) {
+            None => &[],
+            Some(lut) => &lut[..],
+        })
     }
-    
-    /// for a given system, get a copy of the bond-atom triplets of given set of atomic species.
-    /// optionally include the vectors tied to these triplets
-    /// note: the triplets may be for (c2,c1) rather than (c1,c2)
-    pub fn get_per_system_per_center(&self, system: &System, c1:usize,c2:usize, with_vectors: bool) -> Result<Vec<BATripletInfo>, Error>{  
+    fn get_centers_lut<'a>(&self, system: &'a System, c1:usize, c2:usize) -> Result<&'a [usize], Error> {
         {
             let sz = system.size()?;
             if c1 >= sz || c2 >= sz {
                 return Err(Error::InvalidParameter("center ID too high for system".into()));
             }
         }
-        
-        let block: &TensorBlock = system.data(&Self::CACHE_NAME1)
+        let full_lut: &Vec<Vec<Vec<usize>>> = system.data(&Self::CACHE_NAME3)
             .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
             .downcast_ref().ok_or_else(||{Error::Internal("Failed to downcast cache".into())})?;
-        let centers_lut: &Vec<Vec<Vec<usize>>> = system.data(&Self::CACHE_NAME3)
-            .ok_or_else(||Error::Internal("triplets not yet computed".into()))?
-            .downcast_ref().ok_or_else(||{Error::Internal("Failed to downcast cache".into())})?;
-        let centers_lut = if c1 >= c2 {
-            &centers_lut[c1][c2]
+        if c1 >= c2 {
+            Ok(&full_lut[c1][c2])
         } else {
-            &centers_lut[c2][c1]
-        };
+            Ok(&full_lut[c2][c1])
+        }
+    }
+    
+    /// for a given system, get a reference to the bond-atom triplets of given set of atomic species.
+    /// note: inverting s1 and s2 does not change the result, and the returned triplets may have these species swapped
+    pub fn get_per_system_per_species<'a>(
+        &self, system: &'a System,
+        s1:i32,s2:i32,s3:i32
+    ) -> Result<impl Iterator<Item = &'a BATripletInfo> + 'a, Error> {  
+        let triplets = self.get_for_system(system)?;
+        let species_lut = self.get_species_lut(system, s1, s2, s3)?;
         
-        let res:Vec<_> = centers_lut.iter().map(|triplet_i|{
-            //|[atom_i,atom_j,atom_k,bond_i,triplet_i,is_self_contrib]| {
-            let samps = block.samples();
-            let (atom_i,atom_j,atom_k,bond_i,triplet_i,is_self_contrib) = if let &[a,b,c,d,e,f] = &samps[*triplet_i] {
-                (a,b,c,d,e,f)
-            } else {
-                unreachable!();  // error: wrong length for sample description
-            };
-            let (bond_vector,third_vector) = if with_vectors {
-                let values = block.values();
-                let vecslice = values.as_array().slice(s![triplet_i.usize(),..,0_usize]);                    let v = vecslice.to_slice().ok_or_else(||Error::Internal("triplet cache does not have vectors be contiguous".into())).unwrap();                    (Some(Vector3D::new(v[0],v[1],v[2])), Some(Vector3D::new(v[3],v[4],v[5])))
-            } else {
-                (None,None)
-            };
-            BATripletInfo{
-                atom_i: atom_i.usize(), atom_j: atom_j.usize(), atom_k: atom_k.usize(),
-                bond_i: bond_i.usize(), triplet_i: triplet_i.usize(),
-                is_self_contrib: (is_self_contrib.i32()!=0),
-                bond_vector, third_vector,
-            }
-        }).collect();
+        let res = species_lut.iter().map(|triplet_i|{
+            triplets.get(*triplet_i).unwrap()
+        });
+        Ok(res)
+    }
+    
+    /// for a given system, get a reference to the bond-atom triplets of given set of atomic species.
+    /// note: the triplets may be for (c2,c1) rather than (c1,c2)
+    pub fn get_per_system_per_center<'a>(
+        &self, system: &'a System,
+        c1:usize,c2:usize
+    ) -> Result<impl Iterator<Item = &'a BATripletInfo> + 'a, Error>{  
+        let triplets = self.get_for_system(system)?;
+        let centers_lut = self.get_centers_lut(system, c1, c2)?;
         
+        let res = centers_lut.iter().map(|triplet_i|{
+            triplets.get(*triplet_i).unwrap()
+        });
+        Ok(res)
+    }
+    
+    /// for a given system, get a reference to the bond-atom triplets of given set of atomic species.
+    /// plus the number of each triplet
+    /// note: inverting s1 and s2 does not change the result, and the returned triplets may have these species swapped
+    pub fn get_per_system_per_species_enumerated<'a>(
+        &self, system: &'a System,
+        s1:i32,s2:i32,s3:i32
+    ) -> Result<impl Iterator<Item = (usize,&'a BATripletInfo)> + 'a, Error> {  
+        let triplets = self.get_for_system(system)?;
+        let species_lut = self.get_species_lut(system, s1, s2, s3)?;
+        
+        let res = species_lut.iter().map(|triplet_i|{
+            (*triplet_i,triplets.get(*triplet_i).unwrap())
+        });
+        Ok(res)
+    }
+    
+    /// for a given system, get a reference to the bond-atom triplets of given set of atomic species.
+    /// plus the number of each triplet
+    /// note: the triplets may be for (c2,c1) rather than (c1,c2)
+    pub fn get_per_system_per_center_enumerated<'a>(
+        &self, system: &'a System,
+        c1:usize,c2:usize
+    ) -> Result<impl Iterator<Item = (usize,&'a BATripletInfo)> + 'a, Error>{  
+        let triplets = self.get_for_system(system)?;
+        let centers_lut = self.get_centers_lut(system, c1, c2)?;
+        
+        let res = centers_lut.iter().map(|triplet_i|{
+            (*triplet_i,triplets.get(*triplet_i).unwrap())
+        });
         Ok(res)
     }
     
@@ -446,6 +357,23 @@ mod tests {
     //use crate::Matrix3;
     use super::*;
 
+    
+    fn no_vector(mut t: BATripletInfo) -> BATripletInfo {
+        t.bond_vector =Vector3D::new(0.,0.,0.);
+        t.third_vector =Vector3D::new(0.,0.,0.);
+        t
+    }
+    fn gen_triplet(atom_i: usize, atom_j: usize, atom_k:usize, is_self_contrib:bool) -> BATripletInfo {
+        BATripletInfo{
+            atom_i,atom_j,atom_k,
+            is_self_contrib,
+            bond_vector: Vector3D::new(0.,0.,0.),
+            third_vector: Vector3D::new(0.,0.,0.),
+            bond_cell_shift: [0;3],
+            third_cell_shift: [0;3],
+        }
+    }
+    
     #[test]
     fn simple_enum() {
         let mut tsysv = test_systems(&["water"]);
@@ -455,86 +383,97 @@ mod tests {
         precalc.ensure_computed_for_system(&mut tsysv[0]).unwrap();
         
         // /// ensure the enumeration is correct
-        let triplets = precalc.get_for_system(&mut tsysv[0], false).unwrap();
+        let triplets = precalc.get_for_system(&mut tsysv[0]).unwrap();
+        let triplets = triplets.iter().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:0,bond_i:0,triplet_i:0,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:1,bond_i:0,triplet_i:1,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:2,bond_i:0,triplet_i:2,is_self_contrib:false,bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:0,bond_i:1,triplet_i:3,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:2,bond_i:1,triplet_i:4,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:1,bond_i:1,triplet_i:5,is_self_contrib:false,bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:1,bond_i:2,triplet_i:6,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:2,bond_i:2,triplet_i:7,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:0,bond_i:2,triplet_i:8,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,1,0, true,),
+            gen_triplet(0,1,1, true,),
+            gen_triplet(0,1,2, false,),
+            gen_triplet(0,2,0, true,),
+            gen_triplet(0,2,2, true,),
+            gen_triplet(0,2,1, false,),
+            gen_triplet(1,2,1, true,),
+            gen_triplet(1,2,2, true,),
+            gen_triplet(1,2,0, false,),
         ]);
         
         // /// ensure the per-center enumeration is correct
-        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 0,1,false).unwrap();
+        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 0,1)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:0,bond_i:0,triplet_i:0,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:1,bond_i:0,triplet_i:1,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:2,bond_i:0,triplet_i:2,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,1,0, true,),
+            gen_triplet(0,1,1, true,),
+            gen_triplet(0,1,2, false,),
         ]);
-        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 1,0,false).unwrap();
+        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 1,0)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:0,bond_i:0,triplet_i:0,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:1,bond_i:0,triplet_i:1,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:2,bond_i:0,triplet_i:2,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,1,0, true,),
+            gen_triplet(0,1,1, true,),
+            gen_triplet(0,1,2, false,),
         ]);
-        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 0,2,false).unwrap();
+        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 0,2)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:0,bond_i:1,triplet_i:3,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:2,bond_i:1,triplet_i:4,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:1,bond_i:1,triplet_i:5,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,2,0, true,),
+            gen_triplet(0,2,2, true,),
+            gen_triplet(0,2,1, false,),
         ]);
-        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 2,0,false).unwrap();
+        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 2,0)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:0,bond_i:1,triplet_i:3,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:2,bond_i:1,triplet_i:4,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:1,bond_i:1,triplet_i:5,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,2,0, true,),
+            gen_triplet(0,2,2, true,),
+            gen_triplet(0,2,1, false,),
         ]);
-        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 1,2,false).unwrap();
+        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 1,2)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:1,bond_i:2,triplet_i:6,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:2,bond_i:2,triplet_i:7,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:0,bond_i:2,triplet_i:8,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(1,2,1, true,),
+            gen_triplet(1,2,2, true,),
+            gen_triplet(1,2,0, false,),
         ]);
-        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 2,1,false).unwrap();
+        let triplets = precalc.get_per_system_per_center(&mut tsysv[0], 2,1)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:1,bond_i:2,triplet_i:6,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:2,bond_i:2,triplet_i:7,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:0,bond_i:2,triplet_i:8,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(1,2,1, true,),
+            gen_triplet(1,2,2, true,),
+            gen_triplet(1,2,0, false,),
         ]);
         
         // /// ensure the per-species enumeration is correct
-        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], 1,1, -42,false).unwrap();
+        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], 1,1, -42)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:0,bond_i:2,triplet_i:8,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(1,2,0, false,),
         ]);
-        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], 1,1, 1,false).unwrap();
+        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], 1,1, 1)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:1,bond_i:2,triplet_i:6,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:1,atom_j:2,atom_k:2,bond_i:2,triplet_i:7,is_self_contrib:true, bond_vector:None,third_vector:None},
+            gen_triplet(1,2,1, true,),
+            gen_triplet(1,2,2, true,),
         ]);
-        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], 1,-42, 1,false).unwrap();
+        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], 1,-42, 1)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:1,bond_i:0,triplet_i:1,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:2,bond_i:0,triplet_i:2,is_self_contrib:false,bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:2,bond_i:1,triplet_i:4,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:1,bond_i:1,triplet_i:5,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,1,1, true,),
+            gen_triplet(0,1,2, false,),
+            gen_triplet(0,2,2, true,),
+            gen_triplet(0,2,1, false,),
         ]);
-        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], -42,1, 1,false).unwrap();
+        let triplets = precalc.get_per_system_per_species(&mut tsysv[0], -42,1, 1)
+            .unwrap().map(|v|no_vector(v.clone())).collect::<Vec<_>>();
         assert_eq!(triplets, vec![
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:1,bond_i:0,triplet_i:1,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:1,atom_k:2,bond_i:0,triplet_i:2,is_self_contrib:false,bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:2,bond_i:1,triplet_i:4,is_self_contrib:true, bond_vector:None,third_vector:None},
-            BATripletInfo{atom_i:0,atom_j:2,atom_k:1,bond_i:1,triplet_i:5,is_self_contrib:false,bond_vector:None,third_vector:None},
+            gen_triplet(0,1,1, true,),
+            gen_triplet(0,1,2, false,),
+            gen_triplet(0,2,2, true,),
+            gen_triplet(0,2,1, false,),
         ]);
         
         // ///// deal with the vectors
 
-        let triplets = precalc.get_for_system(&mut tsysv[0], true).unwrap();
-        let (bondvecs, thirdvecs): (Vec<_>,Vec<_>) = triplets.into_iter().map(|t|(t.bond_vector.unwrap(),t.third_vector.unwrap()))
+        let triplets = precalc.get_for_system(&mut tsysv[0]).unwrap();
+        let (bondvecs, thirdvecs): (Vec<_>,Vec<_>) = triplets.into_iter().map(|t|(t.bond_vector,t.third_vector))
             .unzip();
         
         bondvecs.into_iter().map(|v|(v[0],v[1],v[2]))

@@ -40,7 +40,7 @@ impl<'a> BondCenteredSamples<'a> {
 impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
     fn sample_names() -> Vec<&'static str> {
         // bond_i is needed in case we have several bonds with the same atoms (periodic boundaries)
-        vec!["structure", "first_center", "second_center", "bond_i"]
+        vec!["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"]
     }
 
     fn samples(&self, systems: &mut [System]) -> Result<Labels, Error> {
@@ -53,13 +53,13 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
             self.raw_triplets.ensure_computed_for_system(system)?;
             let species = system.species()?;
             
-            let mut center_cache: BTreeMap<(usize,usize,usize), BTreeSet<i32>> = BTreeMap::new();
+            let mut center_cache: BTreeMap<(usize,usize,[i32;3]), BTreeSet<i32>> = BTreeMap::new();
             
             match (&self.species_center_1, &self.species_center_2) {
                 (SpeciesFilter::Any, SpeciesFilter::Any) => {
-                    for triplet in self.raw_triplets.get_for_system(system, false)? {
+                    for triplet in self.raw_triplets.get_for_system(system)? {
                         if self.self_contributions || (!triplet.is_self_contrib){
-                            center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_i))
+                            center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_cell_shift))
                                 .or_insert_with(BTreeSet::new)
                                 .insert(species[triplet.atom_k]);
                         }
@@ -70,11 +70,11 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
                 (SpeciesFilter::Single(s1), SpeciesFilter::Single(s2)) => {
                     let species_set = BTreeSet::from_iter(species.iter());
                     for s3 in species_set {
-                        for triplet in self.raw_triplets.get_per_system_per_species(system, *s1, *s2, *s3, false)? {
+                        for triplet in self.raw_triplets.get_per_system_per_species(system, *s1, *s2, *s3)? {
                             if !self.self_contributions && triplet.is_self_contrib {
                                 continue;
                             }
-                            center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_i))
+                            center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_cell_shift))
                                 .or_insert_with(BTreeSet::new)
                                 .insert(species[triplet.atom_k]);
                         }
@@ -90,11 +90,11 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
                             if !selection_2.matches(species_center_2) {
                                 continue;
                             }
-                            for triplet in self.raw_triplets.get_per_system_per_center(system, center_i, center_j, false)? {
+                            for triplet in self.raw_triplets.get_per_system_per_center(system, center_i, center_j)? {
                                 if !self.self_contributions && triplet.is_self_contrib {
                                     continue;
                                 }
-                                center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_i))
+                                center_cache.entry((triplet.atom_i, triplet.atom_j, triplet.bond_cell_shift))
                                 .or_insert_with(BTreeSet::new)
                                 .insert(species[triplet.atom_k]);
                             }
@@ -104,29 +104,29 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
             }
             match &self.species_neighbor {
                 SpeciesFilter::Any => {
-                    for (center_1,center_2,bond_i) in center_cache.keys() {
-                        builder.add(&[system_i,*center_1,*center_2,*bond_i]);
+                    for (center_1,center_2,cell_shft) in center_cache.keys() {
+                        builder.add(&[system_i as i32,*center_1 as i32,*center_2 as i32, cell_shft[0],cell_shft[1],cell_shft[2]]);
                     }
                 },
                 SpeciesFilter::AllOf(requirements) => {
-                    for ((center_1,center_2,bond_i), neigh_set) in center_cache.iter() {
+                    for ((center_1,center_2,cell_shft), neigh_set) in center_cache.iter() {
                         if requirements.is_subset(neigh_set) {
-                            builder.add(&[system_i,*center_1,*center_2,*bond_i]);
+                            builder.add(&[system_i as i32,*center_1 as i32,*center_2 as i32, cell_shft[0],cell_shft[1],cell_shft[2]]);
                         }
                     }
                 },
                 SpeciesFilter::Single(requirement) => {
-                    for ((center_1,center_2,bond_i), neigh_set) in center_cache.iter() {
+                    for ((center_1,center_2,cell_shft), neigh_set) in center_cache.iter() {
                         if neigh_set.contains(requirement) {
-                            builder.add(&[system_i,*center_1,*center_2,*bond_i]);
+                            builder.add(&[system_i as i32,*center_1 as i32,*center_2 as i32, cell_shft[0],cell_shft[1],cell_shft[2]]);
                         }
                     }
                 },
                 SpeciesFilter::OneOf(requirements) => {
                     let requirements: BTreeSet<i32> = BTreeSet::from_iter(requirements.iter().map(|x|*x));
-                    for ((center_1,center_2,bond_i), neigh_set) in center_cache.iter() {
+                    for ((center_1,center_2,cell_shft), neigh_set) in center_cache.iter() {
                         if neigh_set.intersection(&requirements).count()>0 {
-                            builder.add(&[system_i,*center_1,*center_2,*bond_i]);
+                            builder.add(&[system_i as i32,*center_1 as i32,*center_2 as i32, cell_shft[0],cell_shft[1],cell_shft[2]]);
                         }
                     }
                 },
@@ -141,7 +141,7 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
             self.bond_cutoff() > 0.0 && self.bond_cutoff().is_finite() && self.third_cutoff() > 0.0 && self.third_cutoff().is_finite(),
             "cutoffs must be positive for BondCenteredSamples"
         );
-        assert_eq!(samples.names(), ["structure", "first_center", "second_center", "bond_i"]);
+        assert_eq!(samples.names(), ["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"]);
         let mut builder = LabelsBuilder::new(vec!["sample", "structure", "atom"]);
 
         // we could try to find a better way to estimate this, but in the worst
@@ -149,11 +149,11 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
         let average_neighbors_per_atom = 10;
         builder.reserve(average_neighbors_per_atom * samples.count());
 
-        for (sample_i, [structure_i, center_1, center_2, bond_i]) in samples.iter_fixed_size().enumerate() {
+        for (sample_i, [structure_i, center_1, center_2, clsh_a,clsh_b,clsh_c]) in samples.iter_fixed_size().enumerate() {
             let structure_i = structure_i.usize();
             let center_1 = center_1.usize();
             let center_2 = center_2.usize();
-            let bond_i = bond_i.usize();
+            let cell_shift = [clsh_a.i32(),clsh_b.i32(),clsh_c.i32()];
 
             let system = &mut systems[structure_i];
             self.raw_triplets.ensure_computed_for_system(system)?;
@@ -163,8 +163,8 @@ impl<'a> SamplesBuilder for BondCenteredSamples<'a> {
             grad_contributors.insert(center_1);
             grad_contributors.insert(center_2);
 
-            for triplet in self.raw_triplets.get_per_system_per_center(system, center_1, center_2, false)? {
-                if triplet.bond_i != bond_i {
+            for triplet in self.raw_triplets.get_per_system_per_center(system, center_1, center_2)? {
+                if triplet.bond_cell_shift != cell_shift {
                     continue;
                 }
                 match &self.species_neighbor{
@@ -211,8 +211,8 @@ mod tests {
 
         let samples = builder.samples(&mut systems).unwrap();
         assert_eq!(samples, Labels::new(
-            ["structure", "first_center", "second_center", "bond_i"],
-            &[[0, 1, 0, 0], [1, 0, 1, 0], [1, 0, 2, 1], [1, 1, 2, 2]],
+            ["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"],
+            &[[0, 1, 0, 0,0,0], [1, 0, 1, 0,0,0], [1, 0, 2, 0,0,0], [1, 1, 2, 0,0,0]],
         ));
 
         let gradient_samples = builder.gradients_for(&mut systems, &samples).unwrap();
@@ -246,8 +246,8 @@ mod tests {
 
         let samples = builder.samples(&mut systems).unwrap();
         assert_eq!(samples, Labels::new(
-            ["structure", "first_center", "second_center", "bond_i"],
-            &[[0, 1, 0, 0]],
+            ["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"],
+            &[[0, 1, 0, 0,0,0]],
         ));
 
         let gradient_samples = builder.gradients_for(&mut systems, &samples).unwrap();
@@ -270,8 +270,8 @@ mod tests {
 
         let samples = builder.samples(&mut systems).unwrap();
         assert_eq!(samples, Labels::new(
-            ["structure", "first_center", "second_center", "bond_i"],
-            &[[1, 1, 2, 2]],
+            ["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"],
+            &[[1, 1, 2, 0,0,0]],
         ));
 
         let gradient_samples = builder.gradients_for(&mut systems, &samples).unwrap();
@@ -301,8 +301,8 @@ mod tests {
 
         let samples = builder.samples(&mut systems).unwrap();
         assert_eq!(samples, Labels::new(
-            ["structure", "first_center", "second_center", "bond_i"],
-            &[[0, 1, 0, 0], [1, 0, 1, 0], [1, 0, 2, 1], [1, 1, 2, 2]],
+            ["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"],
+            &[[0, 1, 0, 0,0,0], [1, 0, 1, 0,0,0], [1, 0, 2, 0,0,0], [1, 1, 2, 0,0,0]],
         ));
 
         let gradient_samples = builder.gradients_for(&mut systems, &samples).unwrap();
@@ -343,10 +343,10 @@ mod tests {
 
     #[test]
     fn partial_gradients() {
-        let samples = Labels::new(["structure", "first_center", "second_center", "bond_i"], &[
-            [1, 1, 0, 0],
-            [0, 0, 1, 0],
-            [1, 1, 2, 2],
+        let samples = Labels::new(["structure", "first_center", "second_center", "cell_shift_a","cell_shift_b","cell_shift_c"], &[
+            [1, 1, 0, 0,0,0],
+            [0, 0, 1, 0,0,0],
+            [1, 1, 2, 0,0,0],
         ]);
 
         let mut systems = test_systems(&["CH", "water"]);

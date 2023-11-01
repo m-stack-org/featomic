@@ -124,7 +124,7 @@ impl<'a> KeysBuilder for TwoCentersSingleNeighborsSpeciesKeys<'a> {
             self.raw_triplets.ensure_computed_for_system(system)?;
 
             let species = system.species()?;
-            for triplet in self.raw_triplets.get_for_system(system, false)? {
+            for triplet in self.raw_triplets.get_for_system(system)? {
                 if (!self.self_contributions) && triplet.is_self_contrib {
                     continue;
                 }

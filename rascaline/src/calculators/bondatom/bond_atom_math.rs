@@ -209,14 +209,12 @@ pub(crate) fn canonical_vector_for_single_triplet(
     triplet: &BATripletInfo,
     invert: bool,
     compute_grad: bool,
-    mtx_cache: &mut BTreeMap<(usize,bool),Matrix3>,
-    dmtx_cache: &mut BTreeMap<(usize,bool),(Matrix3,Matrix3,Matrix3)>,
+    mtx_cache: &mut BTreeMap<(usize,usize,[i32;3],bool),Matrix3>,
+    dmtx_cache: &mut BTreeMap<(usize,usize,[i32;3],bool),(Matrix3,Matrix3,Matrix3)>,
 ) -> Result<VectorResult,Error> {
 
-    let bond_vector = triplet.bond_vector
-        .ok_or_else(||Error::InvalidParameter("triplet for compute_single_triplet should have vectors set".into()))?;
-    let third_vector = triplet.third_vector
-        .ok_or_else(||Error::InvalidParameter("triplet for compute_single_triplet should have vectors set".into()))?;
+    let bond_vector = triplet.bond_vector;
+    let third_vector = triplet.third_vector;
     let (atom_i,atom_j,bond_vector) = if invert {
         (triplet.atom_j, triplet.atom_i, -bond_vector)
     } else {
@@ -234,13 +232,11 @@ pub(crate) fn canonical_vector_for_single_triplet(
             // third atom on first atom
             -vec_len
         };
-                
         res.vect[2] = vec_len;
                         
-        if compute_grad {
-                            
+        if compute_grad {                  
             let inv_len = 1./vec_len;
-                
+
             res.grads[0] = Some((atom_i,Matrix3::new([
                 [ -0.25* inv_len * third_vector[0], 0., 0.],
                 [ 0., -0.25* inv_len * third_vector[0], 0.],
@@ -255,15 +251,13 @@ pub(crate) fn canonical_vector_for_single_triplet(
         }
     } else {
                     
-        let tf_mtx = match mtx_cache.entry((triplet.bond_i,invert)) {
+        let tf_mtx = match mtx_cache.entry((triplet.atom_i,triplet.atom_j,triplet.bond_cell_shift,invert)) {
             Entry::Occupied(entry) => entry.get().clone(),
             Entry::Vacant(entry) => {
                 entry.insert(rotate_vector_to_z(bond_vector)).clone()
             },
         };
         res.vect = tf_mtx * third_vector;
-            
-        //println!("{} {:?} {:?}", invert, triplet, res);
 
         if compute_grad {
 
@@ -272,7 +266,7 @@ pub(crate) fn canonical_vector_for_single_triplet(
             // also: the indexing of the gradient array is: i_gradsample, derivation_component, value_component, i_property
 
             let du_term = -0.5* tf_mtx;
-            let (tf_mtx_dx, tf_mtx_dy, tf_mtx_dz) = match dmtx_cache.entry((triplet.bond_i,invert)) {
+            let (tf_mtx_dx, tf_mtx_dy, tf_mtx_dz) = match dmtx_cache.entry((triplet.atom_i,triplet.atom_j,triplet.bond_cell_shift,invert)) {
                 Entry::Occupied(entry) => entry.get().clone(),
                 Entry::Vacant(entry) => {
                     entry.insert(rotate_vector_to_z_derivatives(bond_vector)).clone()
@@ -307,8 +301,8 @@ pub(crate) fn canonical_vector_for_single_triplet_inplace(
     sample_i: usize,
     system_i: usize,
     invert: bool,
-    mtx_cache: &mut BTreeMap<(usize,bool),Matrix3>,
-    dmtx_cache: &mut BTreeMap<(usize,bool),(Matrix3,Matrix3,Matrix3)>,
+    mtx_cache: &mut BTreeMap<(usize,usize,[i32;3],bool),Matrix3>,
+    dmtx_cache: &mut BTreeMap<(usize,usize,[i32;3],bool),(Matrix3,Matrix3,Matrix3)>,
 ) -> Result<(),Error> {
     let compute_grad = out_block.gradient_mut("positions").is_some();
     let block_data = out_block.data_mut();
@@ -561,7 +555,7 @@ mod tests {
 
     #[test]
     fn half_neighbor_list() {
-        let mut pre_calculator = BATripletNeighborList{
+        let pre_calculator = BATripletNeighborList{
             cutoffs: [2.0,2.0],
         };
 
@@ -581,7 +575,7 @@ mod tests {
             let mut mtx_cache = BTreeMap::new();
             let mut dmtx_cache = BTreeMap::new();
             pre_calculator.ensure_computed_for_system(system).unwrap();
-            let triplets = pre_calculator.get_for_system(system, true).unwrap();
+            let triplets = pre_calculator.get_for_system(system).unwrap();
             for (expected,triplet) in expected.iter().zip(triplets) {
                 let res = canonical_vector_for_single_triplet(&triplet, false, false, &mut mtx_cache, &mut dmtx_cache).unwrap();
                 assert_relative_eq!(res.vect, Vector3D::new(expected[0],expected[1],expected[2]), max_relative=1e-6);
@@ -611,7 +605,7 @@ mod tests {
             let mut mtx_cache = BTreeMap::new();
             let mut dmtx_cache = BTreeMap::new();
             pre_calculator.ensure_computed_for_system(system).unwrap();
-            let triplets = pre_calculator.get_for_system(system, true).unwrap();
+            let triplets = pre_calculator.get_for_system(system).unwrap();
             for (expected,triplet) in expected.iter().zip(triplets) {
                 let res = canonical_vector_for_single_triplet(&triplet, true, false, &mut mtx_cache, &mut dmtx_cache).unwrap();
                 assert_relative_eq!(res.vect, Vector3D::new(expected[0],expected[1],expected[2]), max_relative=1e-6);
