@@ -501,6 +501,7 @@ impl RawSphericalExpansion {
         }
         
         if let Some((dvdx,dvdy,dvdz)) = gradient_orientation {
+            unimplemented!("ööps, gradient not ready yet");
             let gradient_values = gradient_values_o.unwrap();
             
             let ilen = 1./distance;
@@ -520,7 +521,7 @@ impl RawSphericalExpansion {
                        +spherical_harmonics.gradients[1][[l as isize,m as isize]]*ddirda[1]
                        +spherical_harmonics.gradients[2][[l as isize,m as isize]]*ddirda[2]
                     )
-                    // todo scaling_function_gradient
+                    // TODO scaling_function_gradient
                 )
             };
             

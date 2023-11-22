@@ -457,12 +457,6 @@ impl CalculatorBase for SphericalExpansionForBonds {
                 for (triplet_i,inverted,contribution) in self.get_coefficients_for(system, *s1, *s2, &s3_list, do_gradients)? {
                     let triplet = &triplets[triplet_i];
                     
-                    #[cfg(debug_assertions)]{
-                        if triplet.atom_i == triplet.atom_j{
-                            unimplemented!("cannot deal with bonds formed of self-images quite yet.")  // TODO
-                        }
-                    }
-                    
                     let contribution = contribution.borrow();
                     let these_samples = match sample_lut.get(
                         &(triplet.atom_i,triplet.atom_j,triplet.bond_cell_shift)
@@ -476,10 +470,16 @@ impl CalculatorBase for SphericalExpansionForBonds {
                             continue  // this triplet does not contribute to this block
                         }
                         let sample = &s3_samples[*i_s3][*sample_i];
-                        let (atom_1,atom_2) = (sample[1],sample[2]);
-                        if (!inverted) && triplet.atom_i != atom_1.usize(){
+                        let (atom_i,atom_j, ce_sh) = (sample[1].usize(),sample[2].usize(),[sample[3].i32(),sample[4].i32(),sample[5].i32()]);
+                        if (!inverted) && (
+                            triplet.atom_i != atom_i || triplet.atom_j != atom_j
+                            || triplet.bond_cell_shift != ce_sh
+                        ){
                             continue;
-                        } else if inverted && triplet.atom_i != atom_2.usize(){
+                        } else if inverted && (
+                            triplet.atom_i != atom_j || triplet.atom_j != atom_i
+                            || triplet.bond_cell_shift != ce_sh.map(|x|-x)
+                        ){
                             continue;
                         }
                         

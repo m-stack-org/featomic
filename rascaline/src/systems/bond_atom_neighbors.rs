@@ -119,42 +119,55 @@ fn list_raw_triplets(system: &mut dyn SystemBase, bond_cutoff: f64, third_cutoff
         }
         
         
-        // note: pairs_containing does "full enumeration", but the underlying pair objects only form half enumeration.
+        // note: pairs_containing gives the pairs which have that center, as first OR second
+        // but the full list of pairs only forms "an upper triangle" of pairs.
         for one_three in system.pairs_containing(bond.first)?.iter().map(|p|reorient_pair(p.clone())) {
-            let (third,third_vector, to_k) = if one_three.first == bond.first {
-                (one_three.second, one_three.vector - halfbond, one_three.cell_shift_indices)
-            } else {
-                debug_assert_eq!(one_three.second, bond.first);
-                (one_three.first, -one_three.vector - halfbond, one_three.cell_shift_indices.map(|f|-f))
+    
+            let is_self_contrib = {
+                //ASSUMPTION: is_self_contrib means that bond and one_three are the exact same object
+                (bond.vector-one_three.vector).norm2() <1E-5 &&
+                bond.second == one_three.second
             };
-            
-            if third_vector.norm2() < third_cutoff*third_cutoff {
-                
-                let is_self_contrib = {
-                    //ASSUMPTION: is_self_contrib means that bond and one_three are the exact same object
-                    (bond.vector-one_three.vector).norm2() <1E-5 &&
-                    bond.second == third
-                };
-                if is_self_contrib{
-                    //debug_assert_eq!(&bond as *const Pair, one_three as *const Pair);  // they come from different allocations lol
-                    debug_assert_eq!(
-                        (bond.first, bond.second, bond.cell_shift_indices),
-                        (one_three.first, one_three.second, one_three.cell_shift_indices),
-                    );
-                    continue;
-                }
-                
-                
-                let tri = BATripletInfo{
-                    atom_i: bond.first, atom_j: bond.second, atom_k: third,
-                    bond_cell_shift: bond.cell_shift_indices,
-                    third_cell_shift: to_k,
-                    bond_vector: bond.vector,
-                    third_vector,
-                    is_self_contrib: false,
-                };
-                ba_triplets.push(tri);
+            if is_self_contrib{
+                //debug_assert_eq!(&bond as *const Pair, one_three as *const Pair);  // they come from different allocations lol
+                debug_assert_eq!(
+                    (bond.first, bond.second, bond.cell_shift_indices),
+                    (one_three.first, one_three.second, one_three.cell_shift_indices),
+                );
+                continue;
             }
+
+            // note: since we are looking for neighbors that can be distinguished (a pair of atoms and a lone atoms)
+            // we need to ensure undo the anti-double-counting protections from system.pairs, when it comes to self-image pairs
+            // hense, two separate if blocks rather than an if/else pair.
+            if one_three.first == bond.first {
+                let (third,third_vector, to_k) = (one_three.second, one_three.vector - halfbond, one_three.cell_shift_indices);
+                if third_vector.norm2() < third_cutoff*third_cutoff {
+                    let tri = BATripletInfo{
+                        atom_i: bond.first, atom_j: bond.second, atom_k: third,
+                        bond_cell_shift: bond.cell_shift_indices,
+                        third_cell_shift: to_k,
+                        bond_vector: bond.vector,
+                        third_vector,
+                        is_self_contrib: false,
+                    };
+                    ba_triplets.push(tri);
+                }
+            }
+            if one_three.second == bond.first {
+                let (third,third_vector, to_k) = (one_three.first, -one_three.vector - halfbond, one_three.cell_shift_indices.map(|f|-f));
+                if third_vector.norm2() < third_cutoff*third_cutoff {
+                    let tri = BATripletInfo{
+                        atom_i: bond.first, atom_j: bond.second, atom_k: third,
+                        bond_cell_shift: bond.cell_shift_indices,
+                        third_cell_shift: to_k,
+                        bond_vector: bond.vector,
+                        third_vector,
+                        is_self_contrib: false,
+                    };
+                    ba_triplets.push(tri);
+                }
+            };
         }
     }
     Ok(ba_triplets)
