@@ -219,23 +219,27 @@ class SphericalExpansionByPair(CalculatorBase):
 
 class SphericalExpansionForBonds(CalculatorBase):
     """A SOAP-like spherical expansion coefficients for bond-centered environments
-    In other words, the spherical expansion of the neighbor density function centered on the center of a bond,
+    In other words, the spherical expansion of the neighbor density function centered
+    on the center of a bond,
     'after' rotating the system so that the bond is aligned with the z axis.
-    
-    This is not rotationally invariant, and as such you should use some not-implemented-here matheatical trick
+
+    This is not rotationally invariant, and as such you should use some
+    not-implemented-here matheatical trick
     similar to what SOAP (the :py:class:`SoapPowerSpectrum` class) uses.
 
     Most hyperparameters are identical to that of the regulat spherical expansion:
     :ref:`documentation <spherical-expansion>`.
-    
+
     the few changes to this are:
-    
+
     - "cutoff" renamed to "third_cutoff"
-    - "bond_cutoff" which expresses how the pairs of atoms used for the 'bonds' are chosen.
-    - "center_atomS_weight" (caps only used for emphasis): the weight multiplier for the coefficients of the self
-      interactions (where the neighboring atom is one of the pair's atoms).
+    - "bond_cutoff" which expresses how the pairs of atoms used for the 'bonds' are
+      chosen.
+    - "center_atomS_weight" (caps only used for emphasis): the weight multiplier
+      for the coefficients of the self interactions
+      (where the neighboring atom is one of the pair's atoms).
     """
-    
+
     def __init__(
         self,
         bond_cutoff,
@@ -249,7 +253,7 @@ class SphericalExpansionForBonds(CalculatorBase):
         radial_scaling=None,
     ):
         parameters = {
-            "cutoffs": [bond_cutoff,third_cutoff],
+            "cutoffs": [bond_cutoff, third_cutoff],
             "max_radial": max_radial,
             "max_angular": max_angular,
             "atomic_gaussian_width": atomic_gaussian_width,
@@ -262,6 +266,7 @@ class SphericalExpansionForBonds(CalculatorBase):
             parameters["radial_scaling"] = radial_scaling
 
         super().__init__("spherical_expansion_for_bonds", json.dumps(parameters))
+
 
 class SoapRadialSpectrum(CalculatorBase):
     """Radial spectrum of Smooth Overlap of Atomic Positions (SOAP).
