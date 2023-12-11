@@ -25,6 +25,7 @@ use crate::calculators::soap::{
 use crate::systems::BATripletNeighborList;
 use super::{canonical_vector_for_single_triplet,ExpansionContribution,RawSphericalExpansion,RawSphericalExpansionParameters};
 
+use super::assert_feature_gate;
 
 /// Parameters for spherical expansion calculator for bond-centered neighbor densities.
 ///
@@ -66,6 +67,7 @@ pub struct SphericalExpansionForBondsParameters {
 impl SphericalExpansionForBondsParameters {
     /// Validate all the parameters
     pub fn validate(&self) -> Result<(), Error> {
+        assert_feature_gate();
         self.cutoff_function.validate()?;
         self.radial_scaling.validate()?;
 
@@ -340,6 +342,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
 
     #[time_graph::instrument(name = "SphericalExpansion::compute")]
     fn compute(&mut self, systems: &mut [System], descriptor: &mut TensorMap) -> Result<(), Error> {
+        assert_feature_gate();
         assert_eq!(descriptor.keys().names(), ["spherical_harmonics_l", "species_center_1", "species_center_2", "species_neighbor"]);
         if descriptor.blocks().len() == 0 {
             return Ok(());
@@ -515,6 +518,7 @@ mod tests {
     use ndarray::ArrayD;
     use metatensor::{Labels, TensorBlock, EmptyArray, LabelsBuilder, TensorMap};
 
+    use crate::calculators::bondatom::set_feature_gate;
     use crate::systems::test_utils::test_systems;
     use crate::{Calculator, CalculationOptions, LabelsSelection};
     use crate::calculators::CalculatorBase;
@@ -525,6 +529,7 @@ mod tests {
 
 
     fn parameters() -> SphericalExpansionForBondsParameters {
+        set_feature_gate();
         SphericalExpansionForBondsParameters {
             cutoffs: [3.5,3.5],
             max_radial: 6,
