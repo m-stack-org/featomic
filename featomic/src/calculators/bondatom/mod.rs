@@ -12,7 +12,7 @@ pub use spherical_expansion_bondcentered::{
 
 
 
-const FEATURE_GATE: &'static str = "RASCALINE_EXPERIMENTAL_BOND_ATOM_SPX";
+const FEATURE_GATE: &'static str = "FEATOMIC_EXPERIMENTAL_BOND_ATOM_SPX";
 fn get_feature_gate() -> bool {
     use std::env;
     if let Ok(var) = env::var(FEATURE_GATE) {

@@ -286,7 +286,7 @@ impl CalculatorBase for SphericalExpansionForBonds {
                 continue;
             }
 
-            let mut component = LabelsBuilder::new(vec!["spherical_harmonics_m"]);
+            let mut component = LabelsBuilder::new(vec!["o3_mu"]);
             for m in -o3_lambda.i32()..=o3_lambda.i32() {
                 component.add(&[LabelValue::new(m)]);
             }
